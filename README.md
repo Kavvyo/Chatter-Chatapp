@@ -65,7 +65,6 @@ cd chatter
 ```bash
 cd backend
 npm install
-cp .env.example .env  # then edit with your config
 npm run dev
 ```
 
