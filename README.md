@@ -57,7 +57,7 @@ Chatter/
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/your-username/chatter.git
+git clone https://github.com/Kavvyo/Chatter.git
 cd chatter
 ```
 
