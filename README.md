@@ -57,7 +57,7 @@ Chatter/
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/your-username/chatter.git
+git clone https://github.com/Kavvyo/Chatter-Chatapp.git
 cd chatter
 ```
 
@@ -65,7 +65,6 @@ cd chatter
 ```bash
 cd backend
 npm install
-cp .env.example .env  # then edit with your config
 npm run dev
 ```
 
