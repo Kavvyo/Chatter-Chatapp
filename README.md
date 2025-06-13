@@ -58,7 +58,7 @@ Chatter/
 ### 1. Clone the repository
 ```bash
 git clone https://github.com/Kavvyo/Chatter-Chatapp.git
-cd chatter
+cd Chatter-Chatapp
 ```
 
 ### 2. Backend Setup
@@ -73,6 +73,12 @@ npm run dev
 cd frontend
 npm install
 npm run dev
+```
+
+### Build and start 
+```bash
+npm run build
+npm run start
 ```
 
 ---
