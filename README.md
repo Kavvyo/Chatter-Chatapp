@@ -7,7 +7,7 @@
 
 ## 🚀 Features
 
-- ✅ Realtime private messaging
+- ✅ Real-time private messaging
 - ✅ OTP-based authentication
 - ✅ Friend request system
 - ✅ Online/offline user status
@@ -50,6 +50,19 @@ Chatter/
 │   ├── store/
 │   └── main.jsx
 ```
+
+---
+## 🚀 Live Demo
+
+You can try out the live version of the Chat App here:
+
+👉 [Live Chat App Demo](https://chatter-ctdi.onrender.com/)
+
+> ⚠️ **Note:** For the best experience, use the latest version of Chrome or Firefox. On mobile devices, performance may vary depending on your device's memory.
+
+### 🧪 Test Credentials
+Email: testuser@example.com
+Password: 123456
 
 ---
 
