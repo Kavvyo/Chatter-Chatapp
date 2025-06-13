@@ -62,7 +62,7 @@ You can try out the live version of the Chat App here:
 
 ### 🧪 Test Credentials
 Email: testuser@example.com
-Password: 123456
+Password: 1234567
 
 ---
 
