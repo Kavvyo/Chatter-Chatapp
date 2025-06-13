@@ -11,8 +11,6 @@ import messageRoutes from './routes/message.route.js';
 import friendsRoute from './routes/friends.route.js';
 import { app, server } from './lib/socket.js';
 
-console.log({ authRoutes, messageRoutes, friendsRoute });
-
 
 dotenv.config();
 const PORT = process.env.PORT;
@@ -37,24 +35,6 @@ if (process.env.NODE_ENV === "production") {
     res.sendFile(path.join(__dirname, "../frontend", "dist", "index.html"));
   });
 }
-
-console.log("---- Registered Routes ----");
-
-if (app && app._router && app._router.stack) {
-  app._router.stack
-    .filter(layer => layer.route)
-    .forEach(layer => {
-      const methods = Object.keys(layer.route.methods).join(',').toUpperCase();
-      console.log(`[ROUTE] ${methods} ${layer.route.path}`);
-    });
-} else {
-  console.warn("No routes registered or app._router is undefined.");
-}
-
-console.log("---------------------------");
-
-
-
 
 
 try {
