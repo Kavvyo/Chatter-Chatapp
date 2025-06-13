@@ -3,7 +3,7 @@ import toast from 'react-hot-toast';
 import {Link} from 'react-router-dom';
 import {Lock, Eye, EyeOff, Mail, MessageSquare, User, Loader2} from "lucide-react";
 import { useAuthStore } from "../store/useAuthStore";
-import AuthImagePattern from "../components/Authimagepattern";
+import AuthImagePattern from "../components/AuthImagePattern";
 import Logo from '../assets/logo';
 
 function SignUpPage() {
