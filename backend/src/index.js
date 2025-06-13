@@ -38,7 +38,12 @@ if (process.env.NODE_ENV === "production") {
 
 
 
-server.listen(PORT, () =>{
+try {
+  server.listen(PORT, () =>{
     console.log('Server running on port:' + PORT);
     connectDB();
 })
+
+} catch (error) {
+  console.error("Failed to start server:", err);
+}
