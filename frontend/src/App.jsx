@@ -11,17 +11,30 @@ import ProfilePage from './pages/ProfilePage'
 import OtpVerypage from './pages/OtpVerifyPage'
 import { useAuthStore } from './store/useAuthStore'
 import { useThemeStore } from './store/useThemeStore';
+import { useCallStore } from './store/useCallStore';
 import MobileNav from './components/MobileNav';
+import IncomingCallModal from './components/IncomingCallModal';
+import VideoCall from './components/VideoCall';
 
 const App = () => {
 
   const {authUser, checkAuth, isCheckingAuth} = useAuthStore();
   const {theme} = useThemeStore();
+  const {initializeSocketListeners, uninitializeSocketListeners, callActive, setVideoOpen} = useCallStore();
   const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
     checkAuth();
   },[checkAuth]);
+
+  useEffect(() => {
+    if (authUser) {
+      initializeSocketListeners();
+    }
+    return () => {
+      uninitializeSocketListeners();
+    }
+  }, [authUser, initializeSocketListeners, uninitializeSocketListeners]);
 
   if(isCheckingAuth && !authUser){
     return(
@@ -90,7 +103,13 @@ const App = () => {
 
         </Routes>
 
+      {callActive && (
+        <div className="fixed flex justify-center items-center inset-0 z-50 backdrop-blur-md bg-black/50 h-screen w-screen">
+          <VideoCall />
+        </div>
+      )}
 
+      <IncomingCallModal />
       <Toaster />
     </div>
   )

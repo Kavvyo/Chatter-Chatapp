@@ -1,12 +1,14 @@
-import { ChevronLeft, EllipsisVertical, Video, X } from "lucide-react";
+import { ChevronLeft, EllipsisVertical, VideoIcon } from "lucide-react";
 import { useAuthStore } from "../store/useAuthStore";
 import { useChatStore } from "../store/useChatStore";
+import { useCallStore } from "../store/useCallStore";
 import { useEffect, useRef, useState } from "react";
 import VerticalMenu from "./VerticalMenu";
 
 const ChatHeader = ({setAlertOpen}) => {
   const { selectedUser, setSelectedUser } = useChatStore();
   const {onlineUsers } = useAuthStore();
+  const { callUser } = useCallStore();
   const[menuOpen, setMenuOpen] = useState(false);
 
   const menuRef = useRef(null);
@@ -60,6 +62,10 @@ const ChatHeader = ({setAlertOpen}) => {
         </div>
 
               <div className="flex gap-5 items-center">
+
+                <button onClick={() => callUser(selectedUser)}>
+                  <VideoIcon />
+                </button>
               
                 
                 <div ref={menuRef}>
@@ -76,8 +82,6 @@ const ChatHeader = ({setAlertOpen}) => {
                 
                  </div>
               </div>
-              
-
           
       </div>
     </div>
