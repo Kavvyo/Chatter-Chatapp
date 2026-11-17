@@ -73,6 +73,13 @@ io.on("connection", (socket) => {
     socket.on("callUser", ({ userToCall, signalData, from, name, avatar, callType }) => {
         if (!userToCall) return;
         const targetId = userToCall.toString();
+
+        // Prevent self-calling loop
+        if (targetId === socket.userId) {
+            socket.emit("callFailed", { reason: "self", message: "You cannot call yourself" });
+            return;
+        }
+
         const isOnline = userSocketsMap.has(targetId) && userSocketsMap.get(targetId).size > 0;
 
         if (!isOnline) {
@@ -80,7 +87,8 @@ io.on("connection", (socket) => {
             return;
         }
 
-        io.to(targetId).emit("incomingCall", { 
+        // Broadcast to target user's room excluding caller socket
+        socket.to(targetId).emit("incomingCall", { 
             signal: signalData, 
             from, 
             name, 
@@ -91,25 +99,25 @@ io.on("connection", (socket) => {
 
     socket.on("answerCall", ({ to, signal }) => {
         if (to) {
-            io.to(to.toString()).emit("callAccepted", signal);
+            socket.to(to.toString()).emit("callAccepted", signal);
         }
     });
 
     socket.on("rejectCall", ({ to }) => {
         if (to) {
-            io.to(to.toString()).emit("callRejected");
+            socket.to(to.toString()).emit("callRejected");
         }
     });
 
     socket.on("userBusy", ({ to }) => {
         if (to) {
-            io.to(to.toString()).emit("userBusy");
+            socket.to(to.toString()).emit("userBusy");
         }
     });
 
     socket.on("endCall", ({ to }) => {
         if (to) {
-            io.to(to.toString()).emit("callEnded");
+            socket.to(to.toString()).emit("callEnded");
         }
     });
 });

@@ -53,14 +53,31 @@ export const useCallStore = create((set, get) => ({
     socket.off("callFailed");
 
     socket.on("incomingCall", (data) => {
-      const { callActive, receivingCall } = get();
+      const { callActive, caller } = get();
 
-      // If already in a call or already receiving another call, report busy
-      if (callActive || receivingCall) {
+      // Case 1: If this is duplicate or updated signal from the CURRENT caller
+      if (caller && caller.toString() === data.from?.toString()) {
+        if (data.signal) {
+          set({ callerSignal: data.signal });
+          const { peer, callAccepted } = get();
+          if (peer && !peer.destroyed && callAccepted) {
+            try {
+              peer.signal(data.signal);
+            } catch (err) {
+              console.warn("Peer signal update error:", err);
+            }
+          }
+        }
+        return;
+      }
+
+      // Case 2: Only report busy if user is currently active in a call with a DIFFERENT person
+      if (callActive && caller && caller.toString() !== data.from?.toString()) {
         socket.emit("userBusy", { to: data.from });
         return;
       }
 
+      // Case 3: Fresh incoming call
       playIncomingRingtone();
 
       set({
@@ -244,16 +261,20 @@ export const useCallStore = create((set, get) => ({
       return;
     }
 
+    let hasSentOffer = false;
     peer.on("signal", (data) => {
-      socket.emit("callUser", {
-        userToCall: userToCall._id,
-        signalData: data,
-        from: authUser._id,
-        name: authUser.fullName,
-        avatar: authUser.profilePic,
-        callType: type,
-      });
-      set({ callStatus: "ringing" });
+      if (!hasSentOffer) {
+        hasSentOffer = true;
+        socket.emit("callUser", {
+          userToCall: userToCall._id,
+          signalData: data,
+          from: authUser._id,
+          name: authUser.fullName,
+          avatar: authUser.profilePic,
+          callType: type,
+        });
+        set({ callStatus: "ringing" });
+      }
     });
 
     peer.on("stream", (currentStream) => {
@@ -319,8 +340,12 @@ export const useCallStore = create((set, get) => ({
       return;
     }
 
+    let hasSentAnswer = false;
     peer.on("signal", (data) => {
-      socket.emit("answerCall", { signal: data, to: caller });
+      if (!hasSentAnswer) {
+        hasSentAnswer = true;
+        socket.emit("answerCall", { signal: data, to: caller });
+      }
     });
 
     peer.on("stream", (currentStream) => {
