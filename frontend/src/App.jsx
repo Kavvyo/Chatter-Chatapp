@@ -18,9 +18,9 @@ import VideoCall from './components/VideoCall';
 
 const App = () => {
 
-  const {authUser, checkAuth, isCheckingAuth} = useAuthStore();
+  const {authUser, checkAuth, isCheckingAuth, socket} = useAuthStore();
   const {theme} = useThemeStore();
-  const {initializeSocketListeners, uninitializeSocketListeners, callActive, setVideoOpen} = useCallStore();
+  const {initializeSocketListeners, uninitializeSocketListeners, callActive} = useCallStore();
   const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
@@ -28,13 +28,13 @@ const App = () => {
   },[checkAuth]);
 
   useEffect(() => {
-    if (authUser) {
-      initializeSocketListeners();
+    if (socket) {
+      initializeSocketListeners(socket);
     }
     return () => {
       uninitializeSocketListeners();
-    }
-  }, [authUser, initializeSocketListeners, uninitializeSocketListeners]);
+    };
+  }, [socket, initializeSocketListeners, uninitializeSocketListeners]);
 
   if(isCheckingAuth && !authUser){
     return(
@@ -103,11 +103,7 @@ const App = () => {
 
         </Routes>
 
-      {callActive && (
-        <div className="fixed flex justify-center items-center inset-0 z-50 backdrop-blur-md bg-black/50 h-screen w-screen">
-          <VideoCall />
-        </div>
-      )}
+      {callActive && <VideoCall />}
 
       <IncomingCallModal />
       <Toaster />

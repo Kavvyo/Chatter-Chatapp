@@ -2,6 +2,20 @@ import { create } from "zustand";
 import Peer from "simple-peer";
 import toast from "react-hot-toast";
 import { useAuthStore } from "./useAuthStore";
+import {
+  playIncomingRingtone,
+  playOutgoingRingback,
+  playEndCallTone,
+  stopCallSounds,
+} from "../lib/callSounds";
+
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
+  { urls: "stun:stun3.l.google.com:19302" },
+  { urls: "stun:stun4.l.google.com:19302" },
+];
 
 export const useCallStore = create((set, get) => ({
   localStream: null,
@@ -9,33 +23,105 @@ export const useCallStore = create((set, get) => ({
   receivingCall: false,
   caller: null,
   callerName: "",
+  callerAvatar: "",
   callerSignal: null,
   callAccepted: false,
   callEnded: false,
   callActive: false,
+  callType: "video", // "voice" | "video"
+  targetUser: null,
+  isCaller: false,
+  isMicMuted: false,
+  isCameraOff: false,
+  facingMode: "user",
+  callStatus: "idle", // "idle" | "calling" | "ringing" | "connected" | "ended"
+  callDuration: 0,
   peer: null,
-  
-  initializeSocketListeners: () => {
-    const socket = useAuthStore.getState().socket;
+  callTimeoutId: null,
+  timerIntervalId: null,
+
+  initializeSocketListeners: (socketInstance) => {
+    const socket = socketInstance || useAuthStore.getState().socket;
     if (!socket) return;
-    
-    // Cleanup first to avoid duplicate listeners
+
+    // Clean up previous listeners to prevent multiple triggers
     socket.off("incomingCall");
     socket.off("callAccepted");
     socket.off("callEnded");
+    socket.off("callRejected");
+    socket.off("userBusy");
+    socket.off("callFailed");
 
     socket.on("incomingCall", (data) => {
+      const { callActive, receivingCall } = get();
+
+      // If already in a call or already receiving another call, report busy
+      if (callActive || receivingCall) {
+        socket.emit("userBusy", { to: data.from });
+        return;
+      }
+
+      playIncomingRingtone();
+
       set({
         receivingCall: true,
         caller: data.from,
-        callerName: data.name,
+        callerName: data.name || "Unknown caller",
+        callerAvatar: data.avatar || "/avatar.png",
         callerSignal: data.signal,
+        callType: data.callType || "video",
+        targetUser: {
+          _id: data.from,
+          fullName: data.name || "Unknown caller",
+          profilePic: data.avatar || "/avatar.png",
+        },
+        callStatus: "ringing",
       });
     });
 
+    socket.on("callAccepted", (signal) => {
+      stopCallSounds();
+      const { peer, callTimeoutId } = get();
+      if (callTimeoutId) {
+        clearTimeout(callTimeoutId);
+      }
+
+      set({ callAccepted: true, callStatus: "connected", callTimeoutId: null });
+
+      // Start duration timer once connected
+      get().startDurationTimer();
+
+      if (peer && !peer.destroyed) {
+        try {
+          peer.signal(signal);
+        } catch (e) {
+          console.error("Error setting remote signal on accept:", e);
+        }
+      }
+    });
+
     socket.on("callEnded", () => {
-      get().leaveCall(false); // don't emit endCall again
-      toast.success("Call ended by the other user.");
+      stopCallSounds();
+      get().leaveCall(false);
+      toast("Call ended by the other user", { icon: "📞" });
+    });
+
+    socket.on("callRejected", () => {
+      stopCallSounds();
+      get().leaveCall(false);
+      toast.error("Call was declined");
+    });
+
+    socket.on("userBusy", () => {
+      stopCallSounds();
+      get().leaveCall(false);
+      toast.error("User is busy on another call");
+    });
+
+    socket.on("callFailed", (data) => {
+      stopCallSounds();
+      get().leaveCall(false);
+      toast.error(data?.message || "User is unavailable");
     });
   },
 
@@ -45,33 +131,118 @@ export const useCallStore = create((set, get) => ({
       socket.off("incomingCall");
       socket.off("callAccepted");
       socket.off("callEnded");
+      socket.off("callRejected");
+      socket.off("userBusy");
+      socket.off("callFailed");
     }
   },
 
-  startLocalStream: async () => {
+  startDurationTimer: () => {
+    const { timerIntervalId } = get();
+    if (timerIntervalId) clearInterval(timerIntervalId);
+
+    const interval = setInterval(() => {
+      set((state) => ({ callDuration: state.callDuration + 1 }));
+    }, 1000);
+
+    set({ timerIntervalId: interval });
+  },
+
+  startLocalStream: async (type = "video") => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      set({ localStream: stream });
+      const isVoice = type === "voice";
+      const constraints = {
+        audio: true,
+        video: isVoice
+          ? false
+          : {
+              facingMode: "user",
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+      };
+
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (videoError) {
+        if (!isVoice) {
+          console.warn("High constraints failed, falling back to basic video+audio", videoError);
+          stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        } else {
+          throw videoError;
+        }
+      }
+
+      set({
+        localStream: stream,
+        callType: type,
+        isMicMuted: false,
+        isCameraOff: isVoice,
+        facingMode: "user",
+      });
       return stream;
     } catch (error) {
-      toast.error("Failed to access camera and microphone");
-      console.error(error);
+      console.error("Media devices access error:", error);
+      toast.error(
+        type === "voice"
+          ? "Microphone access denied or unavailable"
+          : "Camera / Microphone access denied or unavailable"
+      );
       return null;
     }
   },
 
-  callUser: async (userToCall) => {
-    const stream = get().localStream || await get().startLocalStream();
-    if (!stream) return;
-
+  callUser: async (userToCall, type = "video") => {
     const authUser = useAuthStore.getState().authUser;
     const socket = useAuthStore.getState().socket;
 
-    const peer = new Peer({
-      initiator: true,
-      trickle: false,
-      stream: stream,
+    if (!socket || !socket.connected) {
+      toast.error("Not connected to real-time server");
+      return;
+    }
+
+    // Clean up any lingering call state
+    get().leaveCall(false);
+
+    set({
+      callActive: true,
+      callAccepted: false,
+      callEnded: false,
+      caller: userToCall._id,
+      targetUser: userToCall,
+      callType: type,
+      isCaller: true,
+      callStatus: "calling",
+      callDuration: 0,
+      isMicMuted: false,
+      isCameraOff: type === "voice",
     });
+
+    const stream = await get().startLocalStream(type);
+    if (!stream) {
+      get().leaveCall(false);
+      return;
+    }
+
+    playOutgoingRingback();
+
+    let peer;
+    try {
+      peer = new Peer({
+        initiator: true,
+        trickle: false,
+        stream: stream,
+        config: {
+          iceServers: ICE_SERVERS,
+        },
+      });
+    } catch (err) {
+      console.error("Peer creation error:", err);
+      toast.error("WebRTC connection failed to initialize");
+      get().leaveCall(false);
+      return;
+    }
 
     peer.on("signal", (data) => {
       socket.emit("callUser", {
@@ -79,66 +250,150 @@ export const useCallStore = create((set, get) => ({
         signalData: data,
         from: authUser._id,
         name: authUser.fullName,
+        avatar: authUser.profilePic,
+        callType: type,
       });
+      set({ callStatus: "ringing" });
     });
 
     peer.on("stream", (currentStream) => {
-      set({ remoteStream: currentStream });
-    });
-    
-    socket.on("callAccepted", (signal) => {
-      set({ callAccepted: true, callActive: true });
-      peer.signal(signal);
+      stopCallSounds();
+      set({ remoteStream: currentStream, callStatus: "connected" });
+      get().startDurationTimer();
     });
 
-    set({ peer, callActive: true, caller: userToCall._id });
+    peer.on("error", (err) => {
+      console.warn("Peer connection warning/error:", err);
+    });
+
+    peer.on("close", () => {
+      console.log("Peer connection closed");
+    });
+
+    // 45s ringing timeout
+    const timeoutId = setTimeout(() => {
+      if (!get().callAccepted && get().callActive) {
+        toast.error("No answer");
+        get().leaveCall(true);
+      }
+    }, 45000);
+
+    set({ peer, callTimeoutId: timeoutId });
   },
 
   answerCall: async () => {
-    set({ callAccepted: true, callActive: true, receivingCall: false });
-    
-    const stream = get().localStream || await get().startLocalStream();
-    if (!stream) return;
+    stopCallSounds();
+    const { callerSignal, caller, callType } = get();
+    const socket = useAuthStore.getState().socket;
 
-    const peer = new Peer({
-      initiator: false,
-      trickle: false,
-      stream: stream,
+    if (!socket || !callerSignal) return;
+
+    set({
+      callAccepted: true,
+      callActive: true,
+      receivingCall: false,
+      callStatus: "connecting",
+      callDuration: 0,
     });
 
-    const socket = useAuthStore.getState().socket;
-    
+    const stream = await get().startLocalStream(callType || "video");
+    if (!stream) {
+      get().leaveCall(true);
+      return;
+    }
+
+    let peer;
+    try {
+      peer = new Peer({
+        initiator: false,
+        trickle: false,
+        stream: stream,
+        config: {
+          iceServers: ICE_SERVERS,
+        },
+      });
+    } catch (err) {
+      console.error("Receiver peer creation error:", err);
+      toast.error("Failed to answer call");
+      get().leaveCall(true);
+      return;
+    }
+
     peer.on("signal", (data) => {
-      socket.emit("answerCall", { signal: data, to: get().caller });
+      socket.emit("answerCall", { signal: data, to: caller });
     });
 
     peer.on("stream", (currentStream) => {
-      set({ remoteStream: currentStream });
+      set({ remoteStream: currentStream, callStatus: "connected" });
+      get().startDurationTimer();
     });
 
-    peer.signal(get().callerSignal);
+    peer.on("error", (err) => {
+      console.warn("Receiver peer error:", err);
+    });
+
+    try {
+      peer.signal(callerSignal);
+    } catch (err) {
+      console.error("Signal error on answer:", err);
+    }
 
     set({ peer });
   },
 
-  leaveCall: (emitEvent = true) => {
-    const { peer, localStream, caller, callActive } = get();
+  rejectCall: () => {
+    stopCallSounds();
+    const { caller } = get();
     const socket = useAuthStore.getState().socket;
 
-    if (emitEvent && callActive && socket) {
+    if (socket && caller) {
+      socket.emit("rejectCall", { to: caller });
+    }
+
+    set({
+      receivingCall: false,
+      caller: null,
+      callerName: "",
+      callerAvatar: "",
+      callerSignal: null,
+      targetUser: null,
+      callStatus: "idle",
+    });
+  },
+
+  leaveCall: (emitEvent = true) => {
+    stopCallSounds();
+    const { peer, localStream, caller, callActive, callTimeoutId, timerIntervalId } = get();
+    const socket = useAuthStore.getState().socket;
+
+    if (callTimeoutId) {
+      clearTimeout(callTimeoutId);
+    }
+    if (timerIntervalId) {
+      clearInterval(timerIntervalId);
+    }
+
+    if (emitEvent && callActive && socket && caller) {
       socket.emit("endCall", { to: caller });
     }
 
     if (peer) {
-      peer.destroy();
-    }
-    
-    if (localStream) {
-      localStream.getTracks().forEach((track) => track.stop());
+      try {
+        peer.destroy();
+      } catch (e) {
+        console.warn("Peer destroy error:", e);
+      }
     }
 
-    // if we were answering, remove callAccepted listener (might be lingering)
-    if (socket) socket.off("callAccepted");
+    if (localStream) {
+      try {
+        localStream.getTracks().forEach((track) => track.stop());
+      } catch (e) {
+        console.warn("Stream cleanup error:", e);
+      }
+    }
+
+    playEndCallTone();
 
     set({
       localStream: null,
@@ -146,32 +401,120 @@ export const useCallStore = create((set, get) => ({
       receivingCall: false,
       caller: null,
       callerName: "",
+      callerAvatar: "",
       callerSignal: null,
+      targetUser: null,
       callAccepted: false,
       callEnded: true,
       callActive: false,
+      callStatus: "idle",
       peer: null,
+      isMicMuted: false,
+      isCameraOff: false,
+      facingMode: "user",
+      callDuration: 0,
+      callTimeoutId: null,
+      timerIntervalId: null,
     });
-    
+
     setTimeout(() => {
-        set({ callEnded: false });
-    }, 2000);
+      set({ callEnded: false });
+    }, 1500);
   },
 
-  rejectCall: () => {
-    const { caller } = get();
-    const socket = useAuthStore.getState().socket;
-    
-    if (socket && caller) {
-      socket.emit("endCall", { to: caller });
+  toggleMic: () => {
+    const { localStream, isMicMuted } = get();
+    if (!localStream) return;
+    const audioTracks = localStream.getAudioTracks();
+    const newMutedState = !isMicMuted;
+    audioTracks.forEach((track) => {
+      track.enabled = !newMutedState;
+    });
+    set({ isMicMuted: newMutedState });
+  },
+
+  toggleCamera: async () => {
+    const { localStream, isCameraOff, peer } = get();
+
+    // If stream already has video tracks (e.g. video call)
+    if (localStream && localStream.getVideoTracks().length > 0) {
+      const videoTracks = localStream.getVideoTracks();
+      const newCameraOffState = !isCameraOff;
+      videoTracks.forEach((track) => {
+        track.enabled = !newCameraOffState;
+      });
+      set({ isCameraOff: newCameraOffState });
+      return;
     }
 
-    set({
-      receivingCall: false,
-      caller: null,
-      callerName: "",
-      callerSignal: null,
-    });
-  }
+    // Voice call upgrade: add a video track dynamically
+    if (localStream && localStream.getVideoTracks().length === 0) {
+      try {
+        const videoStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user" },
+        });
+        const videoTrack = videoStream.getVideoTracks()[0];
+        if (videoTrack) {
+          localStream.addTrack(videoTrack);
+          if (peer && !peer.destroyed && typeof peer.addTrack === "function") {
+            try {
+              peer.addTrack(videoTrack, localStream);
+            } catch (e) {
+              console.warn("Peer addTrack warning:", e);
+            }
+          }
+          set({
+            localStream: new MediaStream(localStream.getTracks()),
+            isCameraOff: false,
+            callType: "video",
+          });
+          toast.success("Camera turned on");
+        }
+      } catch (err) {
+        console.error("Camera activation error:", err);
+        toast.error("Could not turn on camera");
+      }
+    }
+  },
 
+  switchCamera: async () => {
+    const { localStream, peer, isCameraOff, facingMode } = get();
+    if (!localStream || isCameraOff) return;
+    const currentVideoTrack = localStream.getVideoTracks()[0];
+    if (!currentVideoTrack) return;
+
+    const newFacingMode = facingMode === "user" ? "environment" : "user";
+
+    try {
+      let newStream;
+      try {
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { exact: newFacingMode } },
+          audio: false,
+        });
+      } catch {
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: newFacingMode },
+          audio: false,
+        });
+      }
+
+      const newVideoTrack = newStream.getVideoTracks()[0];
+      if (newVideoTrack) {
+        if (peer && !peer.destroyed && typeof peer.replaceTrack === "function") {
+          peer.replaceTrack(currentVideoTrack, newVideoTrack, localStream);
+        }
+        localStream.removeTrack(currentVideoTrack);
+        currentVideoTrack.stop();
+        localStream.addTrack(newVideoTrack);
+
+        set({
+          localStream: new MediaStream(localStream.getTracks()),
+          facingMode: newFacingMode,
+        });
+      }
+    } catch (err) {
+      console.warn("Could not switch camera:", err);
+    }
+  },
 }));

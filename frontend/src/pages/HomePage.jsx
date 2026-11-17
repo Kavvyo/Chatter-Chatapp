@@ -19,7 +19,7 @@ function HomePage() {
       unSubscribeFromMessages();
       unSubscribeFromFriendReqests();
     };
-  });
+  }, [subscribeToMessages, subscribeToFriendReqests, unSubscribeFromMessages, unSubscribeFromFriendReqests]);
 
   useEffect(() => {
       getPendingRequests();

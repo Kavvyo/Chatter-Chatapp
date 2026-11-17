@@ -67,6 +67,11 @@ export const useFriendsStore = create((set, get) => ({
 
     subscribeToFriendReqests: () => {
         const socket = useAuthStore.getState().socket;
+        if (!socket) return;
+
+        socket.off("newFriendship");
+        socket.off("acceptedFriendship");
+        socket.off("unfriendNotify");
     
         socket.on("newFriendship", (newFriendship) => {
             const { pendingRequests } = get();
@@ -93,6 +98,7 @@ export const useFriendsStore = create((set, get) => ({
     
     unSubscribeFromFriendReqests: () => {
         const socket = useAuthStore.getState().socket;
+        if (!socket) return;
         socket.off("newFriendship");
         socket.off("acceptedFriendship");
         socket.off("unfriendNotify");

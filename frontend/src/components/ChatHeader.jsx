@@ -1,4 +1,4 @@
-import { ChevronLeft, EllipsisVertical, VideoIcon } from "lucide-react";
+import { ChevronLeft, EllipsisVertical, Phone, Video } from "lucide-react";
 import { useAuthStore } from "../store/useAuthStore";
 import { useChatStore } from "../store/useChatStore";
 import { useCallStore } from "../store/useCallStore";
@@ -61,17 +61,32 @@ const ChatHeader = ({setAlertOpen}) => {
           </div>
         </div>
 
-              <div className="flex gap-5 items-center">
+              <div className="flex gap-1 sm:gap-2 items-center">
+                <button
+                  onClick={() => callUser(selectedUser, "voice")}
+                  className="btn btn-ghost btn-circle btn-sm sm:btn-md text-base-content/80 hover:text-primary hover:bg-base-200 transition-colors"
+                  title="Voice call"
+                  aria-label="Voice call"
+                >
+                  <Phone className="size-5" />
+                </button>
 
-                <button onClick={() => callUser(selectedUser)}>
-                  <VideoIcon />
+                <button
+                  onClick={() => callUser(selectedUser, "video")}
+                  className="btn btn-ghost btn-circle btn-sm sm:btn-md text-base-content/80 hover:text-primary hover:bg-base-200 transition-colors"
+                  title="Video call"
+                  aria-label="Video call"
+                >
+                  <Video className="size-5" />
                 </button>
               
-                
                 <div ref={menuRef}>
-
-                  <button onClick={() => setMenuOpen((prev) => !prev)}>
-                    <EllipsisVertical />
+                  <button
+                    onClick={() => setMenuOpen((prev) => !prev)}
+                    className="btn btn-ghost btn-circle btn-sm sm:btn-md text-base-content/80 hover:text-primary hover:bg-base-200 transition-colors"
+                    aria-label="More options"
+                  >
+                    <EllipsisVertical className="size-5" />
                   </button>
                   
                   {menuOpen && (
@@ -79,8 +94,7 @@ const ChatHeader = ({setAlertOpen}) => {
                         <VerticalMenu setAlertOpen = {setAlertOpen}/>
                     </div>
                   )}
-                
-                 </div>
+                </div>
               </div>
           
       </div>

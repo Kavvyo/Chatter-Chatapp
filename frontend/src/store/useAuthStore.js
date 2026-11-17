@@ -3,6 +3,7 @@ import {io} from 'socket.io-client'
 import {create} from 'zustand';
 import {axiosInstanace} from '../lib/axios.js';
 import { useChatStore } from './useChatStore.js';
+import { useCallStore } from './useCallStore.js';
 
 const BASE_URL = import.meta.env.MODE === "development" ? "http://localhost:5001": "/";
 
@@ -117,6 +118,13 @@ export const useAuthStore = create((set, get) => ({
 
         
         set({socket: socket});
+        
+        // Immediately bind call socket listeners
+        useCallStore.getState().initializeSocketListeners(socket);
+        socket.on("connect", () => {
+            useCallStore.getState().initializeSocketListeners(socket);
+        });
+
         socket.on("getOnlineUsers", (userIds) => {
             set({onlineUsers: userIds})
         });
@@ -124,11 +132,11 @@ export const useAuthStore = create((set, get) => ({
         socket.on("newFriendship", (newFriendship) => {
             console.log("Received new friend request:", newFriendship);
             toast.success(`${newFriendship.requester.fullName} sent you a friend request`);
-            
         });
     },
 
     disConnectSocket: () => {
+        useCallStore.getState().uninitializeSocketListeners();
         if(get().socket?.connected) get().socket.disconnect();
     },
 

@@ -7,70 +7,112 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
     cors: {
-        origin: "http://localhost:5173",
+        origin: [process.env.CLIENT_URL, "http://localhost:5173", "http://127.0.0.1:5173"].filter(Boolean),
+        credentials: true
     }
 });
 
-export function getReciverSocketId(userId) {
-    return userSocketMap[userId];
-}
+// Store connected sockets per user: userId -> Set<socket.id>
+const userSocketsMap = new Map();
 
-const userSocketMap = {}; // store online users
+export function getReciverSocketId(userId) {
+    if (!userId) return null;
+    const uid = userId.toString();
+    const sockets = userSocketsMap.get(uid);
+    if (sockets && sockets.size > 0) {
+        return uid; // Room name for the user
+    }
+    return null;
+}
 
 io.on("connection", (socket) => {
     console.log("A user connected", socket.id);
 
     const userId = socket.handshake.query.userId;
-    if(userId) {
-        userSocketMap[userId] = socket.id;
-        socket.userId = userId;
+    if (userId) {
+        const uid = userId.toString();
+        socket.userId = uid;
+        socket.join(uid);
+
+        if (!userSocketsMap.has(uid)) {
+            userSocketsMap.set(uid, new Set());
+        }
+        userSocketsMap.get(uid).add(socket.id);
     }
 
-    io.emit("getOnlineUsers", Object.keys(userSocketMap));
+    io.emit("getOnlineUsers", Array.from(userSocketsMap.keys()));
 
     socket.on("typing", ({ to }) => {
-        const receiverSocketId = userSocketMap[to];
-        if (receiverSocketId) {
-            io.to(receiverSocketId).emit("typing", { from: socket.userId });
+        if (to) {
+            io.to(to.toString()).emit("typing", { from: socket.userId });
         }
     });
     
     socket.on("stopTyping", ({ to }) => {
-        const receiverSocketId = userSocketMap[to];
-        if (receiverSocketId) {
-            io.to(receiverSocketId).emit("stopTyping", { from: socket.userId });
+        if (to) {
+            io.to(to.toString()).emit("stopTyping", { from: socket.userId });
         }
     });
-
 
     socket.on("disconnect", () => {
         console.log("A user disconnected", socket.id);
-        delete userSocketMap[userId];
-        io.emit("getOnlineUsers", Object.keys(userSocketMap));
+        if (socket.userId) {
+            const uid = socket.userId;
+            const sockets = userSocketsMap.get(uid);
+            if (sockets) {
+                sockets.delete(socket.id);
+                if (sockets.size === 0) {
+                    userSocketsMap.delete(uid);
+                }
+            }
+        }
+        io.emit("getOnlineUsers", Array.from(userSocketsMap.keys()));
     });
 
     // WebRTC Signalling Events
-    socket.on("callUser", ({ userToCall, signalData, from, name }) => {
-        const receiverSocketId = userSocketMap[userToCall];
-        if (receiverSocketId) {
-            io.to(receiverSocketId).emit("incomingCall", { signal: signalData, from, name });
+    socket.on("callUser", ({ userToCall, signalData, from, name, avatar, callType }) => {
+        if (!userToCall) return;
+        const targetId = userToCall.toString();
+        const isOnline = userSocketsMap.has(targetId) && userSocketsMap.get(targetId).size > 0;
+
+        if (!isOnline) {
+            socket.emit("callFailed", { reason: "offline", message: "User is currently offline" });
+            return;
         }
+
+        io.to(targetId).emit("incomingCall", { 
+            signal: signalData, 
+            from, 
+            name, 
+            avatar,
+            callType: callType || "video" 
+        });
     });
 
     socket.on("answerCall", ({ to, signal }) => {
-        const callerSocketId = userSocketMap[to]; // 'to' is the original caller
-        if (callerSocketId) {
-            io.to(callerSocketId).emit("callAccepted", signal);
+        if (to) {
+            io.to(to.toString()).emit("callAccepted", signal);
+        }
+    });
+
+    socket.on("rejectCall", ({ to }) => {
+        if (to) {
+            io.to(to.toString()).emit("callRejected");
+        }
+    });
+
+    socket.on("userBusy", ({ to }) => {
+        if (to) {
+            io.to(to.toString()).emit("userBusy");
         }
     });
 
     socket.on("endCall", ({ to }) => {
-        const receiverSocketId = userSocketMap[to];
-        if (receiverSocketId) {
-            io.to(receiverSocketId).emit("callEnded");
+        if (to) {
+            io.to(to.toString()).emit("callEnded");
         }
     });
-})
+});
 
 
 export {io, app, server};
