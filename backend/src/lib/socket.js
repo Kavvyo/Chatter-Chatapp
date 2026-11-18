@@ -69,9 +69,9 @@ io.on("connection", (socket) => {
         io.emit("getOnlineUsers", Array.from(userSocketsMap.keys()));
     });
 
-    // WebRTC Signalling Events
-    socket.on("callUser", ({ userToCall, signalData, from, name, avatar, callType }) => {
-        if (!userToCall) return;
+    // LiveKit Call Signalling Events
+    socket.on("callUser", ({ userToCall, roomName, from, name, avatar, callType }) => {
+        if (!userToCall || !roomName) return;
         const targetId = userToCall.toString();
 
         // Prevent self-calling loop
@@ -87,9 +87,9 @@ io.on("connection", (socket) => {
             return;
         }
 
-        // Broadcast to target user's room excluding caller socket
+        // Notify all devices/tabs of the target user
         socket.to(targetId).emit("incomingCall", { 
-            signal: signalData, 
+            roomName,
             from, 
             name, 
             avatar,
@@ -97,15 +97,23 @@ io.on("connection", (socket) => {
         });
     });
 
-    socket.on("answerCall", ({ to, signal }) => {
+    socket.on("answerCall", ({ to, roomName }) => {
         if (to) {
-            socket.to(to.toString()).emit("callAccepted", signal);
+            socket.to(to.toString()).emit("callAccepted", { roomName });
+        }
+        // Dismiss ringing modal on any other open tabs of the receiver
+        if (socket.userId) {
+            socket.to(socket.userId).emit("callHandledElsewhere");
         }
     });
 
     socket.on("rejectCall", ({ to }) => {
         if (to) {
             socket.to(to.toString()).emit("callRejected");
+        }
+        // Dismiss ringing modal on any other open tabs of the receiver
+        if (socket.userId) {
+            socket.to(socket.userId).emit("callHandledElsewhere");
         }
     });
 

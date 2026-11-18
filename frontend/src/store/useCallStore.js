@@ -1,7 +1,8 @@
 import { create } from "zustand";
-import Peer from "simple-peer";
+import { Room, RoomEvent, Track, VideoPresets } from "livekit-client";
 import toast from "react-hot-toast";
 import { useAuthStore } from "./useAuthStore";
+import { axiosInstanace } from "../lib/axios";
 import {
   playIncomingRingtone,
   playOutgoingRingback,
@@ -9,22 +10,20 @@ import {
   stopCallSounds,
 } from "../lib/callSounds";
 
-const ICE_SERVERS = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
-  { urls: "stun:stun3.l.google.com:19302" },
-  { urls: "stun:stun4.l.google.com:19302" },
-];
-
 export const useCallStore = create((set, get) => ({
-  localStream: null,
-  remoteStream: null,
+  room: null,
+  roomName: null,
+  localVideoTrack: null,
+  remoteVideoTrack: null,
+  remoteAudioTrack: null,
+  remoteVideoMuted: false,
+  remoteAudioMuted: false,
+  audioBlocked: false,
+
   receivingCall: false,
   caller: null,
   callerName: "",
   callerAvatar: "",
-  callerSignal: null,
   callAccepted: false,
   callEnded: false,
   callActive: false,
@@ -34,9 +33,8 @@ export const useCallStore = create((set, get) => ({
   isMicMuted: false,
   isCameraOff: false,
   facingMode: "user",
-  callStatus: "idle", // "idle" | "calling" | "ringing" | "connected" | "ended"
+  callStatus: "idle", // "idle" | "calling" | "ringing" | "connecting" | "connected" | "ended"
   callDuration: 0,
-  peer: null,
   callTimeoutId: null,
   timerIntervalId: null,
 
@@ -44,48 +42,36 @@ export const useCallStore = create((set, get) => ({
     const socket = socketInstance || useAuthStore.getState().socket;
     if (!socket) return;
 
-    // Clean up previous listeners to prevent multiple triggers
     socket.off("incomingCall");
     socket.off("callAccepted");
     socket.off("callEnded");
     socket.off("callRejected");
     socket.off("userBusy");
     socket.off("callFailed");
+    socket.off("callHandledElsewhere");
 
     socket.on("incomingCall", (data) => {
-      const { callActive, caller } = get();
+      const { callActive, caller, roomName } = get();
 
-      // Case 1: If this is duplicate or updated signal from the CURRENT caller
-      if (caller && caller.toString() === data.from?.toString()) {
-        if (data.signal) {
-          set({ callerSignal: data.signal });
-          const { peer, callAccepted } = get();
-          if (peer && !peer.destroyed && callAccepted) {
-            try {
-              peer.signal(data.signal);
-            } catch (err) {
-              console.warn("Peer signal update error:", err);
-            }
-          }
-        }
+      // Ignore duplicate notification for the same room/call
+      if (roomName && data.roomName && roomName === data.roomName) {
         return;
       }
 
-      // Case 2: Only report busy if user is currently active in a call with a DIFFERENT person
+      // Report busy only if user is actively on a call with someone else
       if (callActive && caller && caller.toString() !== data.from?.toString()) {
         socket.emit("userBusy", { to: data.from });
         return;
       }
 
-      // Case 3: Fresh incoming call
       playIncomingRingtone();
 
       set({
         receivingCall: true,
+        roomName: data.roomName,
         caller: data.from,
         callerName: data.name || "Unknown caller",
         callerAvatar: data.avatar || "/avatar.png",
-        callerSignal: data.signal,
         callType: data.callType || "video",
         targetUser: {
           _id: data.from,
@@ -96,31 +82,21 @@ export const useCallStore = create((set, get) => ({
       });
     });
 
-    socket.on("callAccepted", (signal) => {
+    socket.on("callAccepted", () => {
       stopCallSounds();
-      const { peer, callTimeoutId } = get();
+      const { callTimeoutId } = get();
       if (callTimeoutId) {
         clearTimeout(callTimeoutId);
       }
-
-      set({ callAccepted: true, callStatus: "connected", callTimeoutId: null });
-
-      // Start duration timer once connected
-      get().startDurationTimer();
-
-      if (peer && !peer.destroyed) {
-        try {
-          peer.signal(signal);
-        } catch (e) {
-          console.error("Error setting remote signal on accept:", e);
-        }
-      }
+      set({ callAccepted: true, callStatus: "connecting", callTimeoutId: null });
     });
 
     socket.on("callEnded", () => {
+      const { callActive, receivingCall } = get();
+      if (!callActive && !receivingCall) return;
       stopCallSounds();
       get().leaveCall(false);
-      toast("Call ended by the other user", { icon: "📞" });
+      toast("Call ended", { icon: "📞" });
     });
 
     socket.on("callRejected", () => {
@@ -140,6 +116,22 @@ export const useCallStore = create((set, get) => ({
       get().leaveCall(false);
       toast.error(data?.message || "User is unavailable");
     });
+
+    socket.on("callHandledElsewhere", () => {
+      const { receivingCall, callActive } = get();
+      if (receivingCall && !callActive) {
+        stopCallSounds();
+        set({
+          receivingCall: false,
+          roomName: null,
+          caller: null,
+          callerName: "",
+          callerAvatar: "",
+          targetUser: null,
+          callStatus: "idle",
+        });
+      }
+    });
   },
 
   uninitializeSocketListeners: () => {
@@ -151,12 +143,13 @@ export const useCallStore = create((set, get) => ({
       socket.off("callRejected");
       socket.off("userBusy");
       socket.off("callFailed");
+      socket.off("callHandledElsewhere");
     }
   },
 
   startDurationTimer: () => {
     const { timerIntervalId } = get();
-    if (timerIntervalId) clearInterval(timerIntervalId);
+    if (timerIntervalId) return; // Already running
 
     const interval = setInterval(() => {
       set((state) => ({ callDuration: state.callDuration + 1 }));
@@ -165,67 +158,198 @@ export const useCallStore = create((set, get) => ({
     set({ timerIntervalId: interval });
   },
 
-  startLocalStream: async (type = "video") => {
-    try {
-      const isVoice = type === "voice";
-      const constraints = {
-        audio: true,
-        video: isVoice
-          ? false
-          : {
-              facingMode: "user",
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-            },
-      };
+  connectToLiveKitRoom: async (roomName, callType) => {
+    // Request JWT token from backend
+    const res = await axiosInstanace.get("/livekit/token", {
+      params: { roomName },
+    });
+    const { token, url } = res.data;
 
-      let stream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia(constraints);
-      } catch (videoError) {
-        if (!isVoice) {
-          console.warn("High constraints failed, falling back to basic video+audio", videoError);
-          stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        } else {
-          throw videoError;
+    const room = new Room({
+      adaptiveStream: true,
+      dynacast: true,
+      videoCaptureDefaults: {
+        resolution: VideoPresets.h720.resolution,
+        facingMode: "user",
+      },
+    });
+
+    // Helper to sync remote tracks
+    const handleTrackSubscribed = (track) => {
+      stopCallSounds();
+      const { callTimeoutId } = get();
+      if (callTimeoutId) clearTimeout(callTimeoutId);
+
+      if (track.kind === Track.Kind.Video) {
+        set({
+          remoteVideoTrack: track,
+          remoteVideoMuted: track.isMuted,
+          callType: "video",
+          callStatus: "connected",
+          callAccepted: true,
+          callTimeoutId: null,
+        });
+      } else if (track.kind === Track.Kind.Audio) {
+        set({
+          remoteAudioTrack: track,
+          remoteAudioMuted: track.isMuted,
+          callStatus: "connected",
+          callAccepted: true,
+          callTimeoutId: null,
+        });
+      }
+      get().startDurationTimer();
+    };
+
+    room.on(RoomEvent.TrackSubscribed, (track) => {
+      handleTrackSubscribed(track);
+    });
+
+    room.on(RoomEvent.TrackUnsubscribed, (track) => {
+      if (track.kind === Track.Kind.Video) {
+        set({ remoteVideoTrack: null });
+      } else if (track.kind === Track.Kind.Audio) {
+        set({ remoteAudioTrack: null });
+      }
+    });
+
+    room.on(RoomEvent.TrackMuted, (publication, participant) => {
+      if (!participant.isLocal) {
+        if (publication.kind === Track.Kind.Video) {
+          set({ remoteVideoMuted: true });
+        } else if (publication.kind === Track.Kind.Audio) {
+          set({ remoteAudioMuted: true });
         }
       }
+    });
 
-      set({
-        localStream: stream,
-        callType: type,
-        isMicMuted: false,
-        isCameraOff: isVoice,
-        facingMode: "user",
-      });
-      return stream;
-    } catch (error) {
-      console.error("Media devices access error:", error);
-      toast.error(
-        type === "voice"
-          ? "Microphone access denied or unavailable"
-          : "Camera / Microphone access denied or unavailable"
-      );
-      return null;
+    room.on(RoomEvent.TrackUnmuted, (publication, participant) => {
+      if (!participant.isLocal) {
+        if (publication.kind === Track.Kind.Video) {
+          set({ remoteVideoMuted: false, callType: "video" });
+        } else if (publication.kind === Track.Kind.Audio) {
+          set({ remoteAudioMuted: false });
+        }
+      }
+    });
+
+    room.on(RoomEvent.LocalTrackPublished, (publication) => {
+      if (publication.kind === Track.Kind.Video && publication.track) {
+        set({ localVideoTrack: publication.track, isCameraOff: false });
+      }
+    });
+
+    room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
+      if (publication.kind === Track.Kind.Video) {
+        set({ localVideoTrack: null, isCameraOff: true });
+      }
+    });
+
+    room.on(RoomEvent.ParticipantConnected, () => {
+      stopCallSounds();
+      const { callTimeoutId } = get();
+      if (callTimeoutId) clearTimeout(callTimeoutId);
+      set({ callStatus: "connected", callAccepted: true, callTimeoutId: null });
+      get().startDurationTimer();
+    });
+
+    room.on(RoomEvent.ParticipantDisconnected, () => {
+      // In a 1-on-1 call, if the other participant leaves the room, end the call cleanly
+      if (room.remoteParticipants.size === 0 && get().callActive) {
+        get().leaveCall(false);
+        toast("Call ended", { icon: "📞" });
+      }
+    });
+
+    room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
+      set({ audioBlocked: !room.canPlaybackAudio });
+    });
+
+    room.on(RoomEvent.Disconnected, () => {
+      // Only trigger cleanup if this room is still the active room
+      if (get().room === room && get().callActive) {
+        get().leaveCall(false);
+      }
+    });
+
+    // Connect to LiveKit SFU
+    await room.connect(url, token);
+
+    // Ensure audio playback is unlocked on mobile browsers
+    try {
+      await room.startAudio();
+    } catch {
+      // Handled by AudioPlaybackStatusChanged if blocked
     }
+    set({ room, audioBlocked: !room.canPlaybackAudio });
+
+    // Check if the other participant is already in the room (e.g., receiver joining caller's room)
+    if (room.remoteParticipants.size > 0) {
+      stopCallSounds();
+      set({ callStatus: "connected", callAccepted: true });
+      get().startDurationTimer();
+
+      room.remoteParticipants.forEach((participant) => {
+        participant.trackPublications.forEach((pub) => {
+          if (pub.isSubscribed && pub.track) {
+            handleTrackSubscribed(pub.track);
+          }
+        });
+      });
+    }
+
+    // Enable Microphone
+    try {
+      await room.localParticipant.setMicrophoneEnabled(true);
+      set({ isMicMuted: false });
+    } catch (err) {
+      console.error("Microphone permission error:", err);
+      set({ isMicMuted: true });
+      toast.error("Could not access microphone");
+    }
+
+    // Enable Camera only if video call
+    if (callType === "video") {
+      try {
+        await room.localParticipant.setCameraEnabled(true);
+        const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+        set({
+          localVideoTrack: camPub?.track || null,
+          isCameraOff: false,
+        });
+      } catch (err) {
+        console.error("Camera permission error:", err);
+        set({ isCameraOff: true });
+        toast.error("Could not access camera — continuing with audio only");
+      }
+    } else {
+      set({ isCameraOff: true, localVideoTrack: null });
+    }
+
+    return room;
   },
 
   callUser: async (userToCall, type = "video") => {
     const authUser = useAuthStore.getState().authUser;
     const socket = useAuthStore.getState().socket;
 
-    if (!socket || !socket.connected) {
-      toast.error("Not connected to real-time server");
+    if (!socket || !socket.connected || !authUser) {
+      toast.error("Not connected to server");
       return;
     }
 
     // Clean up any lingering call state
-    get().leaveCall(false);
+    if (get().callActive || get().room) {
+      get().leaveCall(false);
+    }
+
+    const roomName = `call_${authUser._id}_${userToCall._id}_${Date.now()}`;
 
     set({
       callActive: true,
       callAccepted: false,
       callEnded: false,
+      roomName,
       caller: userToCall._id,
       targetUser: userToCall,
       callType: type,
@@ -234,80 +358,56 @@ export const useCallStore = create((set, get) => ({
       callDuration: 0,
       isMicMuted: false,
       isCameraOff: type === "voice",
+      remoteVideoTrack: null,
+      remoteAudioTrack: null,
+      remoteVideoMuted: false,
+      remoteAudioMuted: false,
     });
 
-    const stream = await get().startLocalStream(type);
-    if (!stream) {
-      get().leaveCall(false);
-      return;
-    }
-
-    playOutgoingRingback();
-
-    let peer;
     try {
-      peer = new Peer({
-        initiator: true,
-        trickle: false,
-        stream: stream,
-        config: {
-          iceServers: ICE_SERVERS,
-        },
+      // Connect to LiveKit SFU room first so caller's media is immediately ready when receiver answers
+      await get().connectToLiveKitRoom(roomName, type);
+
+      // Guard in case user hung up while connecting
+      if (!get().callActive || get().roomName !== roomName) {
+        return;
+      }
+
+      playOutgoingRingback();
+
+      socket.emit("callUser", {
+        userToCall: userToCall._id,
+        roomName,
+        from: authUser._id,
+        name: authUser.fullName,
+        avatar: authUser.profilePic,
+        callType: type,
       });
-    } catch (err) {
-      console.error("Peer creation error:", err);
-      toast.error("WebRTC connection failed to initialize");
+
+      set({ callStatus: "ringing" });
+
+      // 45s no-answer timeout
+      const timeoutId = setTimeout(() => {
+        if (!get().callAccepted && get().callActive && get().roomName === roomName) {
+          toast.error("No answer");
+          get().leaveCall(true);
+        }
+      }, 45000);
+
+      set({ callTimeoutId: timeoutId });
+    } catch (error) {
+      console.error("Failed to start LiveKit call:", error);
+      toast.error(error?.response?.data?.message || "Failed to connect call");
       get().leaveCall(false);
-      return;
     }
-
-    let hasSentOffer = false;
-    peer.on("signal", (data) => {
-      if (!hasSentOffer) {
-        hasSentOffer = true;
-        socket.emit("callUser", {
-          userToCall: userToCall._id,
-          signalData: data,
-          from: authUser._id,
-          name: authUser.fullName,
-          avatar: authUser.profilePic,
-          callType: type,
-        });
-        set({ callStatus: "ringing" });
-      }
-    });
-
-    peer.on("stream", (currentStream) => {
-      stopCallSounds();
-      set({ remoteStream: currentStream, callStatus: "connected" });
-      get().startDurationTimer();
-    });
-
-    peer.on("error", (err) => {
-      console.warn("Peer connection warning/error:", err);
-    });
-
-    peer.on("close", () => {
-      console.log("Peer connection closed");
-    });
-
-    // 45s ringing timeout
-    const timeoutId = setTimeout(() => {
-      if (!get().callAccepted && get().callActive) {
-        toast.error("No answer");
-        get().leaveCall(true);
-      }
-    }, 45000);
-
-    set({ peer, callTimeoutId: timeoutId });
   },
 
   answerCall: async () => {
     stopCallSounds();
-    const { callerSignal, caller, callType } = get();
+    const { roomName, caller, callType } = get();
     const socket = useAuthStore.getState().socket;
 
-    if (!socket || !callerSignal) return;
+    if (!socket || !roomName) return;
 
     set({
       callAccepted: true,
@@ -315,55 +415,18 @@ export const useCallStore = create((set, get) => ({
       receivingCall: false,
       callStatus: "connecting",
       callDuration: 0,
+      isCaller: false,
     });
 
-    const stream = await get().startLocalStream(callType || "video");
-    if (!stream) {
-      get().leaveCall(true);
-      return;
-    }
-
-    let peer;
-    try {
-      peer = new Peer({
-        initiator: false,
-        trickle: false,
-        stream: stream,
-        config: {
-          iceServers: ICE_SERVERS,
-        },
-      });
-    } catch (err) {
-      console.error("Receiver peer creation error:", err);
-      toast.error("Failed to answer call");
-      get().leaveCall(true);
-      return;
-    }
-
-    let hasSentAnswer = false;
-    peer.on("signal", (data) => {
-      if (!hasSentAnswer) {
-        hasSentAnswer = true;
-        socket.emit("answerCall", { signal: data, to: caller });
-      }
-    });
-
-    peer.on("stream", (currentStream) => {
-      set({ remoteStream: currentStream, callStatus: "connected" });
-      get().startDurationTimer();
-    });
-
-    peer.on("error", (err) => {
-      console.warn("Receiver peer error:", err);
-    });
+    socket.emit("answerCall", { to: caller, roomName });
 
     try {
-      peer.signal(callerSignal);
-    } catch (err) {
-      console.error("Signal error on answer:", err);
+      await get().connectToLiveKitRoom(roomName, callType || "video");
+    } catch (error) {
+      console.error("Failed to join LiveKit room:", error);
+      toast.error("Failed to connect to call");
+      get().leaveCall(true);
     }
-
-    set({ peer });
   },
 
   rejectCall: () => {
@@ -377,10 +440,10 @@ export const useCallStore = create((set, get) => ({
 
     set({
       receivingCall: false,
+      roomName: null,
       caller: null,
       callerName: "",
       callerAvatar: "",
-      callerSignal: null,
       targetUser: null,
       callStatus: "idle",
     });
@@ -388,7 +451,7 @@ export const useCallStore = create((set, get) => ({
 
   leaveCall: (emitEvent = true) => {
     stopCallSounds();
-    const { peer, localStream, caller, callActive, callTimeoutId, timerIntervalId } = get();
+    const { room, caller, callActive, callTimeoutId, timerIntervalId } = get();
     const socket = useAuthStore.getState().socket;
 
     if (callTimeoutId) {
@@ -402,38 +465,25 @@ export const useCallStore = create((set, get) => ({
       socket.emit("endCall", { to: caller });
     }
 
-    if (peer) {
-      try {
-        peer.destroy();
-      } catch (e) {
-        console.warn("Peer destroy error:", e);
-      }
-    }
-
-    if (localStream) {
-      try {
-        localStream.getTracks().forEach((track) => track.stop());
-      } catch (e) {
-        console.warn("Stream cleanup error:", e);
-      }
-    }
-
-    playEndCallTone();
-
+    // Reset state before calling room.disconnect() so Disconnected event handler doesn't re-enter
     set({
-      localStream: null,
-      remoteStream: null,
+      room: null,
+      roomName: null,
+      localVideoTrack: null,
+      remoteVideoTrack: null,
+      remoteAudioTrack: null,
+      remoteVideoMuted: false,
+      remoteAudioMuted: false,
+      audioBlocked: false,
       receivingCall: false,
       caller: null,
       callerName: "",
       callerAvatar: "",
-      callerSignal: null,
       targetUser: null,
       callAccepted: false,
       callEnded: true,
       callActive: false,
       callStatus: "idle",
-      peer: null,
       isMicMuted: false,
       isCameraOff: false,
       facingMode: "user",
@@ -442,104 +492,81 @@ export const useCallStore = create((set, get) => ({
       timerIntervalId: null,
     });
 
+    if (room) {
+      try {
+        room.removeAllListeners();
+        room.disconnect(true);
+      } catch (e) {
+        console.warn("LiveKit disconnect warning:", e);
+      }
+    }
+
+    if (callActive) {
+      playEndCallTone();
+    }
+
     setTimeout(() => {
       set({ callEnded: false });
     }, 1500);
   },
 
-  toggleMic: () => {
-    const { localStream, isMicMuted } = get();
-    if (!localStream) return;
-    const audioTracks = localStream.getAudioTracks();
-    const newMutedState = !isMicMuted;
-    audioTracks.forEach((track) => {
-      track.enabled = !newMutedState;
-    });
-    set({ isMicMuted: newMutedState });
+  toggleMic: async () => {
+    const { room, isMicMuted } = get();
+    if (!room) return;
+    const nextMuted = !isMicMuted;
+    try {
+      await room.localParticipant.setMicrophoneEnabled(!nextMuted);
+      set({ isMicMuted: nextMuted });
+    } catch (err) {
+      console.error("Error toggling microphone:", err);
+      toast.error("Could not toggle microphone");
+    }
   },
 
   toggleCamera: async () => {
-    const { localStream, isCameraOff, peer } = get();
-
-    // If stream already has video tracks (e.g. video call)
-    if (localStream && localStream.getVideoTracks().length > 0) {
-      const videoTracks = localStream.getVideoTracks();
-      const newCameraOffState = !isCameraOff;
-      videoTracks.forEach((track) => {
-        track.enabled = !newCameraOffState;
-      });
-      set({ isCameraOff: newCameraOffState });
-      return;
-    }
-
-    // Voice call upgrade: add a video track dynamically
-    if (localStream && localStream.getVideoTracks().length === 0) {
-      try {
-        const videoStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "user" },
-        });
-        const videoTrack = videoStream.getVideoTracks()[0];
-        if (videoTrack) {
-          localStream.addTrack(videoTrack);
-          if (peer && !peer.destroyed && typeof peer.addTrack === "function") {
-            try {
-              peer.addTrack(videoTrack, localStream);
-            } catch (e) {
-              console.warn("Peer addTrack warning:", e);
-            }
-          }
-          set({
-            localStream: new MediaStream(localStream.getTracks()),
-            isCameraOff: false,
-            callType: "video",
-          });
-          toast.success("Camera turned on");
-        }
-      } catch (err) {
-        console.error("Camera activation error:", err);
-        toast.error("Could not turn on camera");
-      }
+    const { room, isCameraOff } = get();
+    if (!room) return;
+    const nextCameraOff = !isCameraOff;
+    try {
+      await room.localParticipant.setCameraEnabled(!nextCameraOff);
+      const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+      set((state) => ({
+        isCameraOff: nextCameraOff,
+        localVideoTrack: nextCameraOff ? null : camPub?.track || null,
+        // Upgrade UI to video mode if turning camera on during a voice call
+        callType: !nextCameraOff ? "video" : state.callType,
+      }));
+    } catch (err) {
+      console.error("Error toggling camera:", err);
+      toast.error("Could not access camera");
     }
   },
 
   switchCamera: async () => {
-    const { localStream, peer, isCameraOff, facingMode } = get();
-    if (!localStream || isCameraOff) return;
-    const currentVideoTrack = localStream.getVideoTracks()[0];
-    if (!currentVideoTrack) return;
+    const { localVideoTrack, isCameraOff, facingMode } = get();
+    if (!localVideoTrack || isCameraOff) return;
 
     const newFacingMode = facingMode === "user" ? "environment" : "user";
-
     try {
-      let newStream;
-      try {
-        newStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { exact: newFacingMode } },
-          audio: false,
-        });
-      } catch {
-        newStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: newFacingMode },
-          audio: false,
-        });
-      }
-
-      const newVideoTrack = newStream.getVideoTracks()[0];
-      if (newVideoTrack) {
-        if (peer && !peer.destroyed && typeof peer.replaceTrack === "function") {
-          peer.replaceTrack(currentVideoTrack, newVideoTrack, localStream);
-        }
-        localStream.removeTrack(currentVideoTrack);
-        currentVideoTrack.stop();
-        localStream.addTrack(newVideoTrack);
-
-        set({
-          localStream: new MediaStream(localStream.getTracks()),
-          facingMode: newFacingMode,
-        });
-      }
+      await localVideoTrack.restartTrack({
+        facingMode: newFacingMode,
+        resolution: VideoPresets.h720.resolution,
+      });
+      set({ facingMode: newFacingMode });
     } catch (err) {
       console.warn("Could not switch camera:", err);
+      toast.error("No secondary camera available");
+    }
+  },
+
+  unlockAudio: async () => {
+    const { room } = get();
+    if (!room) return;
+    try {
+      await room.startAudio();
+      set({ audioBlocked: !room.canPlaybackAudio });
+    } catch (err) {
+      console.warn("Audio unlock failed:", err);
     }
   },
 }));
