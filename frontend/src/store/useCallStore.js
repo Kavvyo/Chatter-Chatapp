@@ -1,5 +1,11 @@
 import { create } from "zustand";
-import { Room, RoomEvent, Track, VideoPresets } from "livekit-client";
+import {
+  Room,
+  RoomEvent,
+  Track,
+  VideoPresets,
+  createLocalTracks,
+} from "livekit-client";
 import toast from "react-hot-toast";
 import { useAuthStore } from "./useAuthStore";
 import { axiosInstanace } from "../lib/axios";
@@ -10,9 +16,33 @@ import {
   stopCallSounds,
 } from "../lib/callSounds";
 
+// Tuned for ultra-low-latency 1-on-1 voice & video calling
+function createOptimizedRoom() {
+  return new Room({
+    adaptiveStream: false, // Skip ResizeObserver 180p->HD ramp-up delay
+    dynacast: false, // Stream video immediately for 1-on-1 calls
+    videoCaptureDefaults: {
+      resolution: VideoPresets.h540.resolution,
+      facingMode: "user",
+    },
+    publishDefaults: {
+      simulcast: false, // Single stream = 3x lower CPU & encoding latency on 1-on-1
+      dtx: true, // Discord-style silence suppression (Discontinuous Transmission)
+      red: true, // Redundant audio packet recovery for lossy mobile networks
+      videoCodec: "vp8",
+      videoEncoding: {
+        maxBitrate: 900_000,
+        maxFramerate: 30,
+      },
+    },
+  });
+}
+
 export const useCallStore = create((set, get) => ({
   room: null,
   roomName: null,
+  preparedCall: null, // { roomName, token, url, room }
+  pendingTracks: [],
   localVideoTrack: null,
   remoteVideoTrack: null,
   remoteAudioTrack: null,
@@ -53,12 +83,10 @@ export const useCallStore = create((set, get) => ({
     socket.on("incomingCall", (data) => {
       const { callActive, caller, roomName } = get();
 
-      // Ignore duplicate notification for the same room/call
       if (roomName && data.roomName && roomName === data.roomName) {
         return;
       }
 
-      // Report busy only if user is actively on a call with someone else
       if (callActive && caller && caller.toString() !== data.from?.toString()) {
         socket.emit("userBusy", { to: data.from });
         return;
@@ -66,9 +94,23 @@ export const useCallStore = create((set, get) => ({
 
       playIncomingRingtone();
 
+      // Immediately pre-warm LiveKit Cloud region, DNS & TLS while ringing!
+      let preparedCall = null;
+      if (data.token && data.url && data.roomName) {
+        const preparedRoom = createOptimizedRoom();
+        preparedRoom.prepareConnection(data.url, data.token).catch(() => {});
+        preparedCall = {
+          roomName: data.roomName,
+          token: data.token,
+          url: data.url,
+          room: preparedRoom,
+        };
+      }
+
       set({
         receivingCall: true,
         roomName: data.roomName,
+        preparedCall,
         caller: data.from,
         callerName: data.name || "Unknown caller",
         callerAvatar: data.avatar || "/avatar.png",
@@ -80,6 +122,29 @@ export const useCallStore = create((set, get) => ({
         },
         callStatus: "ringing",
       });
+
+      // Fallback pre-fetch only if socket payload did not include token
+      if (!preparedCall && data.roomName) {
+        axiosInstanace
+          .get("/livekit/token", { params: { roomName: data.roomName } })
+          .then((res) => {
+            if (get().roomName === data.roomName && get().receivingCall) {
+              const preparedRoom = createOptimizedRoom();
+              preparedRoom
+                .prepareConnection(res.data.url, res.data.token)
+                .catch(() => {});
+              set({
+                preparedCall: {
+                  roomName: data.roomName,
+                  token: res.data.token,
+                  url: res.data.url,
+                  room: preparedRoom,
+                },
+              });
+            }
+          })
+          .catch(() => {});
+      }
     });
 
     socket.on("callAccepted", () => {
@@ -124,6 +189,7 @@ export const useCallStore = create((set, get) => ({
         set({
           receivingCall: false,
           roomName: null,
+          preparedCall: null,
           caller: null,
           callerName: "",
           callerAvatar: "",
@@ -149,7 +215,7 @@ export const useCallStore = create((set, get) => ({
 
   startDurationTimer: () => {
     const { timerIntervalId } = get();
-    if (timerIntervalId) return; // Already running
+    if (timerIntervalId) return;
 
     const interval = setInterval(() => {
       set((state) => ({ callDuration: state.callDuration + 1 }));
@@ -158,174 +224,246 @@ export const useCallStore = create((set, get) => ({
     set({ timerIntervalId: interval });
   },
 
-  connectToLiveKitRoom: async (roomName, callType) => {
-    // Request JWT token from backend
-    const res = await axiosInstanace.get("/livekit/token", {
-      params: { roomName },
-    });
-    const { token, url } = res.data;
+  connectToLiveKitRoom: async (roomName, callType, authPromise = null) => {
+    const isVideo = callType === "video";
 
-    const room = new Room({
-      adaptiveStream: true,
-      dynacast: true,
-      videoCaptureDefaults: {
-        resolution: VideoPresets.h720.resolution,
-        facingMode: "user",
-      },
-    });
-
-    // Helper to sync remote tracks
-    const handleTrackSubscribed = (track) => {
-      stopCallSounds();
-      const { callTimeoutId } = get();
-      if (callTimeoutId) clearTimeout(callTimeoutId);
-
-      if (track.kind === Track.Kind.Video) {
-        set({
-          remoteVideoTrack: track,
-          remoteVideoMuted: track.isMuted,
-          callType: "video",
-          callStatus: "connected",
-          callAccepted: true,
-          callTimeoutId: null,
-        });
-      } else if (track.kind === Track.Kind.Audio) {
-        set({
-          remoteAudioTrack: track,
-          remoteAudioMuted: track.isMuted,
-          callStatus: "connected",
-          callAccepted: true,
-          callTimeoutId: null,
-        });
-      }
-      get().startDurationTimer();
-    };
-
-    room.on(RoomEvent.TrackSubscribed, (track) => {
-      handleTrackSubscribed(track);
-    });
-
-    room.on(RoomEvent.TrackUnsubscribed, (track) => {
-      if (track.kind === Track.Kind.Video) {
-        set({ remoteVideoTrack: null });
-      } else if (track.kind === Track.Kind.Audio) {
-        set({ remoteAudioTrack: null });
-      }
-    });
-
-    room.on(RoomEvent.TrackMuted, (publication, participant) => {
-      if (!participant.isLocal) {
-        if (publication.kind === Track.Kind.Video) {
-          set({ remoteVideoMuted: true });
-        } else if (publication.kind === Track.Kind.Audio) {
-          set({ remoteAudioMuted: true });
-        }
-      }
-    });
-
-    room.on(RoomEvent.TrackUnmuted, (publication, participant) => {
-      if (!participant.isLocal) {
-        if (publication.kind === Track.Kind.Video) {
-          set({ remoteVideoMuted: false, callType: "video" });
-        } else if (publication.kind === Track.Kind.Audio) {
-          set({ remoteAudioMuted: false });
-        }
-      }
-    });
-
-    room.on(RoomEvent.LocalTrackPublished, (publication) => {
-      if (publication.kind === Track.Kind.Video && publication.track) {
-        set({ localVideoTrack: publication.track, isCameraOff: false });
-      }
-    });
-
-    room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
-      if (publication.kind === Track.Kind.Video) {
-        set({ localVideoTrack: null, isCameraOff: true });
-      }
-    });
-
-    room.on(RoomEvent.ParticipantConnected, () => {
-      stopCallSounds();
-      const { callTimeoutId } = get();
-      if (callTimeoutId) clearTimeout(callTimeoutId);
-      set({ callStatus: "connected", callAccepted: true, callTimeoutId: null });
-      get().startDurationTimer();
-    });
-
-    room.on(RoomEvent.ParticipantDisconnected, () => {
-      // In a 1-on-1 call, if the other participant leaves the room, end the call cleanly
-      if (room.remoteParticipants.size === 0 && get().callActive) {
-        get().leaveCall(false);
-        toast("Call ended", { icon: "📞" });
-      }
-    });
-
-    room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
-      set({ audioBlocked: !room.canPlaybackAudio });
-    });
-
-    room.on(RoomEvent.Disconnected, () => {
-      // Only trigger cleanup if this room is still the active room
-      if (get().room === room && get().callActive) {
-        get().leaveCall(false);
-      }
-    });
-
-    // Connect to LiveKit SFU
-    await room.connect(url, token);
-
-    // Ensure audio playback is unlocked on mobile browsers
-    try {
-      await room.startAudio();
-    } catch {
-      // Handled by AudioPlaybackStatusChanged if blocked
-    }
-    set({ room, audioBlocked: !room.canPlaybackAudio });
-
-    // Check if the other participant is already in the room (e.g., receiver joining caller's room)
-    if (room.remoteParticipants.size > 0) {
-      stopCallSounds();
-      set({ callStatus: "connected", callAccepted: true });
-      get().startDurationTimer();
-
-      room.remoteParticipants.forEach((participant) => {
-        participant.trackPublications.forEach((pub) => {
-          if (pub.isSubscribed && pub.track) {
-            handleTrackSubscribed(pub.track);
-          }
-        });
-      });
-    }
-
-    // Enable Microphone
-    try {
-      await room.localParticipant.setMicrophoneEnabled(true);
-      set({ isMicMuted: false });
-    } catch (err) {
-      console.error("Microphone permission error:", err);
-      set({ isMicMuted: true });
-      toast.error("Could not access microphone");
-    }
-
-    // Enable Camera only if video call
-    if (callType === "video") {
+    // Task A: Start local mic + camera capture IMMEDIATELY (don't wait for network)
+    const captureMediaPromise = (async () => {
+      let tracks = [];
       try {
-        await room.localParticipant.setCameraEnabled(true);
-        const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
-        set({
-          localVideoTrack: camPub?.track || null,
-          isCameraOff: false,
+        tracks = await createLocalTracks({
+          audio: true,
+          video: isVideo
+            ? {
+                facingMode: "user",
+                resolution: VideoPresets.h540.resolution,
+              }
+            : false,
         });
       } catch (err) {
-        console.error("Camera permission error:", err);
-        set({ isCameraOff: true });
-        toast.error("Could not access camera — continuing with audio only");
+        if (isVideo) {
+          console.warn("Video+Audio capture failed, falling back to audio only:", err);
+          try {
+            tracks = await createLocalTracks({ audio: true, video: false });
+            set({ isCameraOff: true });
+            toast.error("Could not access camera — continuing with audio only");
+          } catch (audioErr) {
+            console.error("Audio capture failed:", audioErr);
+            set({ isMicMuted: true, isCameraOff: true });
+            toast.error("Could not access microphone");
+            return [];
+          }
+        } else {
+          console.error("Audio capture failed:", err);
+          set({ isMicMuted: true });
+          toast.error("Could not access microphone");
+          return [];
+        }
       }
-    } else {
-      set({ isCameraOff: true, localVideoTrack: null });
+
+      if (!get().callActive || get().roomName !== roomName) {
+        tracks.forEach((t) => t.stop());
+        return [];
+      }
+
+      const videoTrack = tracks.find((t) => t.kind === Track.Kind.Video) || null;
+      set({
+        pendingTracks: tracks,
+        localVideoTrack: videoTrack,
+        isCameraOff: !videoTrack,
+        isMicMuted: !tracks.some((t) => t.kind === Track.Kind.Audio),
+      });
+
+      return tracks;
+    })();
+
+    // Task B: Resolve token (from Socket ack / pre-warmed cache / HTTP fallback) & connect SFU
+    const connectRoomPromise = (async () => {
+      let token;
+      let url;
+      let room;
+
+      const prepared = get().preparedCall;
+      if (prepared && prepared.roomName === roomName) {
+        token = prepared.token;
+        url = prepared.url;
+        room = prepared.room;
+        set({ preparedCall: null });
+      } else if (authPromise) {
+        const ackAuth = await authPromise;
+        if (ackAuth?.token && ackAuth?.url) {
+          token = ackAuth.token;
+          url = ackAuth.url;
+        }
+      }
+
+      if (!token || !url) {
+        const res = await axiosInstanace.get("/livekit/token", {
+          params: { roomName },
+        });
+        token = res.data.token;
+        url = res.data.url;
+      }
+
+      if (!get().callActive || get().roomName !== roomName) {
+        return null;
+      }
+
+      if (!room) {
+        room = createOptimizedRoom();
+      }
+
+      const handleTrackSubscribed = (track) => {
+        stopCallSounds();
+        const { callTimeoutId } = get();
+        if (callTimeoutId) clearTimeout(callTimeoutId);
+
+        if (track.kind === Track.Kind.Video) {
+          set({
+            remoteVideoTrack: track,
+            remoteVideoMuted: track.isMuted,
+            callType: "video",
+            callStatus: "connected",
+            callAccepted: true,
+            callTimeoutId: null,
+          });
+        } else if (track.kind === Track.Kind.Audio) {
+          set({
+            remoteAudioTrack: track,
+            remoteAudioMuted: track.isMuted,
+            callStatus: "connected",
+            callAccepted: true,
+            callTimeoutId: null,
+          });
+        }
+        get().startDurationTimer();
+      };
+
+      room.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+
+      room.on(RoomEvent.TrackUnsubscribed, (track) => {
+        if (track.kind === Track.Kind.Video) {
+          set({ remoteVideoTrack: null });
+        } else if (track.kind === Track.Kind.Audio) {
+          set({ remoteAudioTrack: null });
+        }
+      });
+
+      room.on(RoomEvent.TrackMuted, (publication, participant) => {
+        if (!participant.isLocal) {
+          if (publication.kind === Track.Kind.Video) {
+            set({ remoteVideoMuted: true });
+          } else if (publication.kind === Track.Kind.Audio) {
+            set({ remoteAudioMuted: true });
+          }
+        }
+      });
+
+      room.on(RoomEvent.TrackUnmuted, (publication, participant) => {
+        if (!participant.isLocal) {
+          if (publication.kind === Track.Kind.Video) {
+            set({ remoteVideoMuted: false, callType: "video" });
+          } else if (publication.kind === Track.Kind.Audio) {
+            set({ remoteAudioMuted: false });
+          }
+        }
+      });
+
+      room.on(RoomEvent.LocalTrackPublished, (publication) => {
+        if (publication.kind === Track.Kind.Video && publication.track) {
+          set({ localVideoTrack: publication.track, isCameraOff: false });
+        }
+      });
+
+      room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
+        if (publication.kind === Track.Kind.Video) {
+          set({ localVideoTrack: null, isCameraOff: true });
+        }
+      });
+
+      room.on(RoomEvent.ParticipantConnected, () => {
+        stopCallSounds();
+        const { callTimeoutId } = get();
+        if (callTimeoutId) clearTimeout(callTimeoutId);
+        set({ callStatus: "connected", callAccepted: true, callTimeoutId: null });
+        get().startDurationTimer();
+      });
+
+      room.on(RoomEvent.ParticipantDisconnected, () => {
+        if (room.remoteParticipants.size === 0 && get().callActive) {
+          get().leaveCall(false);
+          toast("Call ended", { icon: "📞" });
+        }
+      });
+
+      room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
+        set({ audioBlocked: !room.canPlaybackAudio });
+      });
+
+      room.on(RoomEvent.Disconnected, () => {
+        if (get().room === room && get().callActive) {
+          get().leaveCall(false);
+        }
+      });
+
+      await room.connect(url, token);
+
+      if (!get().callActive || get().roomName !== roomName) {
+        room.removeAllListeners();
+        room.disconnect(true);
+        return null;
+      }
+
+      try {
+        await room.startAudio();
+      } catch {
+        // Handled by AudioPlaybackStatusChanged
+      }
+
+      set({ room, audioBlocked: !room.canPlaybackAudio });
+
+      // Subscribe immediately to anyone already in the room
+      if (room.remoteParticipants.size > 0) {
+        stopCallSounds();
+        set({ callStatus: "connected", callAccepted: true });
+        get().startDurationTimer();
+
+        room.remoteParticipants.forEach((participant) => {
+          participant.trackPublications.forEach((pub) => {
+            if (pub.isSubscribed && pub.track) {
+              handleTrackSubscribed(pub.track);
+            }
+          });
+        });
+      }
+
+      return room;
+    })();
+
+    const [room, tracks] = await Promise.all([
+      connectRoomPromise,
+      captureMediaPromise,
+    ]);
+
+    if (!room || !get().callActive || get().roomName !== roomName) {
+      tracks.forEach((t) => t.stop());
+      return null;
     }
 
+    // Publish audio & video tracks in parallel with low-latency settings
+    await Promise.allSettled(
+      tracks.map((track) =>
+        room.localParticipant.publishTrack(track, {
+          source:
+            track.kind === Track.Kind.Video
+              ? Track.Source.Camera
+              : Track.Source.Microphone,
+          simulcast: false,
+        })
+      )
+    );
+
+    set({ pendingTracks: [] });
     return room;
   },
 
@@ -338,7 +476,6 @@ export const useCallStore = create((set, get) => ({
       return;
     }
 
-    // Clean up any lingering call state
     if (get().callActive || get().room) {
       get().leaveCall(false);
     }
@@ -354,7 +491,7 @@ export const useCallStore = create((set, get) => ({
       targetUser: userToCall,
       callType: type,
       isCaller: true,
-      callStatus: "calling",
+      callStatus: "ringing",
       callDuration: 0,
       isMicMuted: false,
       isCameraOff: type === "voice",
@@ -364,41 +501,50 @@ export const useCallStore = create((set, get) => ({
       remoteAudioMuted: false,
     });
 
-    try {
-      // Connect to LiveKit SFU room first so caller's media is immediately ready when receiver answers
-      await get().connectToLiveKitRoom(roomName, type);
+    playOutgoingRingback();
 
-      // Guard in case user hung up while connecting
-      if (!get().callActive || get().roomName !== roomName) {
-        return;
-      }
-
-      playOutgoingRingback();
-
-      socket.emit("callUser", {
-        userToCall: userToCall._id,
-        roomName,
-        from: authUser._id,
-        name: authUser.fullName,
-        avatar: authUser.profilePic,
-        callType: type,
-      });
-
-      set({ callStatus: "ringing" });
-
-      // 45s no-answer timeout
-      const timeoutId = setTimeout(() => {
-        if (!get().callAccepted && get().callActive && get().roomName === roomName) {
-          toast.error("No answer");
-          get().leaveCall(true);
+    // Emit callUser immediately AND get caller's LiveKit token back in the same WebSocket frame (zero DB/HTTP!)
+    const socketAuthPromise = new Promise((resolve) => {
+      const fallbackTimer = setTimeout(() => resolve(null), 3000);
+      socket.emit(
+        "callUser",
+        {
+          userToCall: userToCall._id,
+          roomName,
+          from: authUser._id,
+          name: authUser.fullName,
+          avatar: authUser.profilePic,
+          callType: type,
+          receiverName: userToCall.fullName,
+        },
+        (ack) => {
+          clearTimeout(fallbackTimer);
+          if (ack && ack.ok && ack.token && ack.url) {
+            resolve({ token: ack.token, url: ack.url });
+          } else {
+            resolve(null);
+          }
         }
-      }, 45000);
+      );
+    });
 
-      set({ callTimeoutId: timeoutId });
+    const timeoutId = setTimeout(() => {
+      if (!get().callAccepted && get().callActive && get().roomName === roomName) {
+        toast.error("No answer");
+        get().leaveCall(true);
+      }
+    }, 45000);
+
+    set({ callTimeoutId: timeoutId });
+
+    try {
+      await get().connectToLiveKitRoom(roomName, type, socketAuthPromise);
     } catch (error) {
       console.error("Failed to start LiveKit call:", error);
-      toast.error(error?.response?.data?.message || "Failed to connect call");
-      get().leaveCall(false);
+      if (get().callActive && get().roomName === roomName) {
+        toast.error(error?.response?.data?.message || "Failed to connect call");
+        get().leaveCall(true);
+      }
     }
   },
 
@@ -424,8 +570,10 @@ export const useCallStore = create((set, get) => ({
       await get().connectToLiveKitRoom(roomName, callType || "video");
     } catch (error) {
       console.error("Failed to join LiveKit room:", error);
-      toast.error("Failed to connect to call");
-      get().leaveCall(true);
+      if (get().callActive && get().roomName === roomName) {
+        toast.error("Failed to connect to call");
+        get().leaveCall(true);
+      }
     }
   },
 
@@ -441,6 +589,7 @@ export const useCallStore = create((set, get) => ({
     set({
       receivingCall: false,
       roomName: null,
+      preparedCall: null,
       caller: null,
       callerName: "",
       callerAvatar: "",
@@ -451,7 +600,15 @@ export const useCallStore = create((set, get) => ({
 
   leaveCall: (emitEvent = true) => {
     stopCallSounds();
-    const { room, caller, callActive, callTimeoutId, timerIntervalId } = get();
+    const {
+      room,
+      pendingTracks,
+      localVideoTrack,
+      caller,
+      callActive,
+      callTimeoutId,
+      timerIntervalId,
+    } = get();
     const socket = useAuthStore.getState().socket;
 
     if (callTimeoutId) {
@@ -465,10 +622,11 @@ export const useCallStore = create((set, get) => ({
       socket.emit("endCall", { to: caller });
     }
 
-    // Reset state before calling room.disconnect() so Disconnected event handler doesn't re-enter
     set({
       room: null,
       roomName: null,
+      preparedCall: null,
+      pendingTracks: [],
       localVideoTrack: null,
       remoteVideoTrack: null,
       remoteAudioTrack: null,
@@ -491,6 +649,22 @@ export const useCallStore = create((set, get) => ({
       callTimeoutId: null,
       timerIntervalId: null,
     });
+
+    if (pendingTracks && pendingTracks.length > 0) {
+      pendingTracks.forEach((track) => {
+        try {
+          track.stop();
+        } catch {
+          // ignore
+        }
+      });
+    } else if (localVideoTrack && !room) {
+      try {
+        localVideoTrack.stop();
+      } catch {
+        // ignore
+      }
+    }
 
     if (room) {
       try {
@@ -533,7 +707,6 @@ export const useCallStore = create((set, get) => ({
       set((state) => ({
         isCameraOff: nextCameraOff,
         localVideoTrack: nextCameraOff ? null : camPub?.track || null,
-        // Upgrade UI to video mode if turning camera on during a voice call
         callType: !nextCameraOff ? "video" : state.callType,
       }));
     } catch (err) {
@@ -550,7 +723,7 @@ export const useCallStore = create((set, get) => ({
     try {
       await localVideoTrack.restartTrack({
         facingMode: newFacingMode,
-        resolution: VideoPresets.h720.resolution,
+        resolution: VideoPresets.h540.resolution,
       });
       set({ facingMode: newFacingMode });
     } catch (err) {
