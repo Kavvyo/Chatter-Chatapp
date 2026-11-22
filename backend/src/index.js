@@ -26,6 +26,7 @@ const allowedOrigins = [
   "http://localhost:8081",
   "http://127.0.0.1:8081",
   "http://localhost:5001",
+  "https://chatter-chatapp-production.up.railway.app",
   process.env.CLIENT_URL,
 ].filter(Boolean);
 
@@ -37,7 +38,8 @@ app.use(cors({
       allowedOrigins.includes(origin) ||
       origin.startsWith('http://localhost:') ||
       origin.startsWith('http://127.0.0.1:') ||
-      origin.startsWith('http://192.168.')
+      origin.startsWith('http://192.168.') ||
+      origin.includes('railway.app')
     ) {
       return callback(null, true);
     }

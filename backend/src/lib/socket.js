@@ -38,6 +38,7 @@ const io = new Server(server, {
                 origin.startsWith('http://localhost:') ||
                 origin.startsWith('http://127.0.0.1:') ||
                 origin.startsWith('http://192.168.') ||
+                origin.includes('railway.app') ||
                 origin === process.env.CLIENT_URL
             ) {
                 return callback(null, true);
