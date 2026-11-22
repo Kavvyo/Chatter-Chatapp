@@ -93,10 +93,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       createdAt: new Date().toISOString(),
     };
 
-    set({ messages: [...messages, optimisticMessage] });
+    // Immediately clear unread count for this user upon sending a message
+    set((state) => ({
+      messages: [...state.messages, optimisticMessage],
+      unreadCounts: { ...state.unreadCounts, [selectedUser._id]: 0 },
+    }));
 
     try {
       const res = await axiosInstance.post(`/messages/send/${selectedUser._id}`, messageData);
+      get().markMessageAsRead(selectedUser._id);
       
       // Seamlessly swap temp message with server confirmed message
       const currentList = get().messages;
@@ -181,24 +186,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setSelectedUser: (selectedUser) => {
-    const { unreadCounts } = get();
-    if (selectedUser && unreadCounts[selectedUser._id]) {
-      const updatedCounts = { ...unreadCounts };
-      delete updatedCounts[selectedUser._id];
-      set({ unreadCounts: updatedCounts });
-    }
     set({ selectedUser, isTyping: false });
-    if (selectedUser) {
-      get().markMessageAsRead(selectedUser._id);
-    }
   },
 
   deleteAllMessages: async (userId: string) => {
+    // 0ms optimistic clear
+    set({ messages: [] });
     try {
       await axiosInstance.delete(`/messages/deleteAll/${userId}`);
       await get().getMessages(userId);
     } catch (error) {
-      // ignore
+      // Re-fetch if deletion failed on server
+      await get().getMessages(userId);
     }
   },
 
@@ -217,6 +216,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   markMessageAsRead: async (userId: string) => {
     if (!userId) return;
+    // Clear locally in 0ms so badges disappear instantly
+    set((state) => ({
+      unreadCounts: { ...state.unreadCounts, [userId]: 0 },
+    }));
     try {
       await axiosInstance.put(`/messages/read/${userId}`);
     } catch (error) {

@@ -1,7 +1,10 @@
 import { create } from 'zustand';
 import { Socket } from 'socket.io-client';
 import { useAuthStore } from './useAuthStore';
+import { useToastStore } from './useToastStore';
 import { playRingtone, stopCallSounds } from '../lib/sound';
+import { requestCallPermissions } from '../lib/permissions';
+import { axiosInstance } from '../lib/axios';
 
 export interface CallTargetUser {
   _id: string;
@@ -32,12 +35,12 @@ interface CallState {
   initializeSocketListeners: (socketInstance?: Socket | null) => void;
   uninitializeSocketListeners: () => void;
   startDurationTimer: () => void;
-  callUser: (userToCall: CallTargetUser, type?: 'voice' | 'video') => void;
-  answerCall: () => void;
+  callUser: (userToCall: CallTargetUser, type?: 'voice' | 'video') => Promise<void> | void;
+  answerCall: () => Promise<void> | void;
   rejectCall: () => void;
   leaveCall: (emitEvent?: boolean) => void;
-  toggleMic: () => void;
-  toggleCamera: () => void;
+  toggleMic: () => Promise<void> | void;
+  toggleCamera: () => Promise<void> | void;
   switchCamera: () => void;
 }
 
@@ -172,17 +175,41 @@ export const useCallStore = create<CallState>((set, get) => ({
     set({ timerIntervalId: interval });
   },
 
-  callUser: (userToCall, type = 'video') => {
+  callUser: async (userToCall, type = 'video') => {
     const authUser = useAuthStore.getState().authUser;
     const socket = useAuthStore.getState().socket;
 
     if (!socket || !authUser) return;
+
+    // 1. Request required system permissions (Microphone for voice, Mic + Camera for video)
+    const perm = await requestCallPermissions(type);
+    if (!perm.granted) {
+      useToastStore.getState().showAlert(
+        'Permission Required',
+        `${perm.missing.join(' and ')} permission is required to start a ${type} call. Please allow permission to proceed.`,
+        [{ text: 'OK', style: 'default' }]
+      );
+      return;
+    }
 
     if (get().callActive) {
       get().leaveCall(false);
     }
 
     const roomName = `call_${authUser._id}_${userToCall._id}_${Date.now()}`;
+
+    // 2. Fetch LiveKit credentials from backend
+    let token: string | null = null;
+    let url: string | null = null;
+    try {
+      const res = await axiosInstance.get('/livekit/token', {
+        params: { roomName },
+      });
+      token = res.data?.token || null;
+      url = res.data?.url || null;
+    } catch (err) {
+      console.warn('Could not pre-fetch LiveKit token:', err);
+    }
 
     set({
       callActive: true,
@@ -207,6 +234,8 @@ export const useCallStore = create<CallState>((set, get) => ({
       avatar: authUser.profilePic,
       callType: type,
       receiverName: userToCall.fullName,
+      token,
+      url,
     });
 
     const timeoutId = setTimeout(() => {
@@ -218,12 +247,32 @@ export const useCallStore = create<CallState>((set, get) => ({
     set({ callTimeoutId: timeoutId });
   },
 
-  answerCall: () => {
+  answerCall: async () => {
     stopCallSounds();
-    const { roomName, caller } = get();
+    const { roomName, caller, callType } = get();
     const socket = useAuthStore.getState().socket;
 
     if (!socket || !roomName) return;
+
+    // 1. Request required system permissions on incoming call accept
+    const perm = await requestCallPermissions(callType);
+    if (!perm.granted) {
+      useToastStore.getState().showAlert(
+        'Permission Required',
+        `${perm.missing.join(' and ')} permission is required to join this ${callType} call.`,
+        [{ text: 'OK', style: 'default' }]
+      );
+      return;
+    }
+
+    // 2. Fetch LiveKit credentials for this room
+    try {
+      await axiosInstance.get('/livekit/token', {
+        params: { roomName },
+      });
+    } catch (err) {
+      console.warn('Could not fetch LiveKit token on answer:', err);
+    }
 
     set({
       callAccepted: true,
@@ -294,15 +343,33 @@ export const useCallStore = create<CallState>((set, get) => ({
     }, 1500);
   },
 
-  toggleMic: () => {
-    set((state) => ({ isMicMuted: !state.isMicMuted }));
+  toggleMic: async () => {
+    const { isMicMuted } = get();
+    if (isMicMuted) {
+      // Unmuting: ensure audio permission is granted
+      const perm = await requestCallPermissions('voice');
+      if (!perm.granted) {
+        useToastStore.getState().showToast('Microphone permission required to unmute', 'error');
+        return;
+      }
+    }
+    set({ isMicMuted: !isMicMuted });
   },
 
-  toggleCamera: () => {
-    set((state) => ({
-      isCameraOff: !state.isCameraOff,
-      callType: state.isCameraOff ? 'video' : state.callType,
-    }));
+  toggleCamera: async () => {
+    const { isCameraOff } = get();
+    if (isCameraOff) {
+      // Turning camera ON: ensure camera permission is granted
+      const perm = await requestCallPermissions('video');
+      if (!perm.granted) {
+        useToastStore.getState().showToast('Camera permission required to enable video', 'error');
+        return;
+      }
+    }
+    set({
+      isCameraOff: !isCameraOff,
+      callType: isCameraOff ? 'video' : get().callType,
+    });
   },
 
   switchCamera: () => {

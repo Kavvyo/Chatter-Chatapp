@@ -94,10 +94,10 @@ export const MessageInput: React.FC = () => {
     sendMessage(messagePayload);
   };
 
-  // Elevated bottom padding when keyboard is closed vs open
+  // Snug bottom padding when keyboard is open vs closed
   const dynamicBottomPadding = isKeyboardVisible
-    ? 10
-    : Math.max(insets.bottom + 12, 22);
+    ? 4
+    : Math.max(insets.bottom + 6, 16);
 
   return (
     <View
@@ -169,7 +169,7 @@ export const MessageInput: React.FC = () => {
 const styles = StyleSheet.create({
   outerContainer: {
     paddingHorizontal: 16,
-    paddingTop: 8,
+    paddingTop: 4,
   },
   previewContainer: {
     position: 'relative',

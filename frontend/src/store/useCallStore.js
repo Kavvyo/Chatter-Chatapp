@@ -153,7 +153,8 @@ export const useCallStore = create((set, get) => ({
       if (callTimeoutId) {
         clearTimeout(callTimeoutId);
       }
-      set({ callAccepted: true, callStatus: "connecting", callTimeoutId: null });
+      set({ callAccepted: true, callStatus: "connected", callTimeoutId: null });
+      get().startDurationTimer();
     });
 
     socket.on("callEnded", () => {
@@ -559,12 +560,13 @@ export const useCallStore = create((set, get) => ({
       callAccepted: true,
       callActive: true,
       receivingCall: false,
-      callStatus: "connecting",
+      callStatus: "connected",
       callDuration: 0,
       isCaller: false,
     });
 
     socket.emit("answerCall", { to: caller, roomName });
+    get().startDurationTimer();
 
     try {
       await get().connectToLiveKitRoom(roomName, callType || "video");

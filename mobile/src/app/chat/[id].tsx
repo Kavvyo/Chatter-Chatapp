@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, useState } from 'react';
 import {
   View,
   Text,
@@ -20,7 +20,7 @@ import { MessageBubble } from '../../components/chat/MessageBubble';
 import { MessageInput } from '../../components/chat/MessageInput';
 
 export default function ChatConversationScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, unreadCount: paramUnreadCount } = useLocalSearchParams<{ id: string; unreadCount?: string }>();
   const { theme } = useThemeStore();
   const { authUser, socket } = useAuthStore();
   const {
@@ -33,6 +33,7 @@ export default function ChatConversationScreen() {
     deleteAllMessages,
     subscribeToMessages,
     markMessageAsRead,
+    unreadCounts,
     users,
     getUsers,
   } = useChatStore();
@@ -40,6 +41,11 @@ export default function ChatConversationScreen() {
   const { showAlert, showToast } = useToastStore();
 
   const flatListRef = useRef<FlatList>(null);
+  const initialUnreadCountRef = useRef<number>(
+    parseInt(paramUnreadCount || '0', 10) || (id ? useChatStore.getState().unreadCounts[id] || 0 : 0)
+  );
+  const [firstUnreadId, setFirstUnreadId] = useState<string | null>(null);
+  const unreadEvaluatedRef = useRef(false);
 
   // Sync selected user from id if missing
   useEffect(() => {
@@ -66,50 +72,101 @@ export default function ChatConversationScreen() {
   // Load messages and subscribe on screen mount
   useEffect(() => {
     if (id) {
+      unreadEvaluatedRef.current = false;
       getMessages(id);
-      markMessageAsRead(id);
       subscribeToMessages();
     }
   }, [id, socket]);
 
+  // Capture the first unread message on initial 1st view only, then mark as read
+  useEffect(() => {
+    if (!unreadEvaluatedRef.current && messages.length > 0 && id) {
+      unreadEvaluatedRef.current = true;
+      const count = initialUnreadCountRef.current;
+
+      if (count > 0 && authUser) {
+        // Filter incoming messages from other user
+        const incomingMessages = messages.filter((m) => m.senderId !== authUser._id);
+        const unreadIncoming = incomingMessages.filter((m) => !m.read);
+
+        const target =
+          unreadIncoming.length > 0
+            ? unreadIncoming[0]
+            : incomingMessages.slice(-count)[0];
+
+        if (target) {
+          setFirstUnreadId(target._id);
+        }
+      }
+
+      // Mark as read in DB and clear unread counts locally so subsequent views don't show divider
+      markMessageAsRead(id);
+      initialUnreadCountRef.current = 0;
+    }
+  }, [messages, id, authUser]);
+
+  // Auto-scroll reliably to the latest messages at the bottom
+  useEffect(() => {
+    if (messages.length > 0) {
+      const timer = setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      }, 80);
+      return () => clearTimeout(timer);
+    }
+  }, [messages.length]);
+
   const handleMenuPress = () => {
-    showAlert('Conversation Options', 'What would you like to do?', [
-      {
-        text: 'Clear Chat History',
-        style: 'destructive',
-        onPress: () => {
-          showAlert(
-            'Confirm Clear',
-            'Are you sure you want to delete all messages in this conversation?',
-            [
-              { text: 'Cancel', style: 'cancel' },
-              {
-                text: 'Delete All',
-                style: 'destructive',
-                onPress: async () => {
-                  if (id) {
-                    await deleteAllMessages(id);
-                    showToast('Conversation cleared', 'info');
-                  }
-                },
-              },
-            ]
-          );
+    showAlert(
+      'Clear Conversation',
+      'Are you sure you want to delete all messages in this conversation? This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear Chat',
+          style: 'destructive',
+          onPress: async () => {
+            if (id) {
+              await deleteAllMessages(id);
+              showToast('Conversation cleared', 'info');
+            }
+          },
         },
-      },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
+      ]
+    );
   };
 
   const renderItem = useCallback(
-    ({ item }: { item: any }) => (
-      <MessageBubble
-        message={item}
-        isSender={item.senderId === authUser?._id}
-        senderAvatar={selectedUser?.profilePic}
-      />
-    ),
-    [authUser?._id, selectedUser?.profilePic]
+    ({ item }: { item: any }) => {
+      const isFirstUnread = item._id === firstUnreadId;
+
+      return (
+        <View>
+          {isFirstUnread && (
+            <View style={styles.unreadDividerContainer}>
+              <View style={[styles.unreadDividerLine, { backgroundColor: theme.primary + '50' }]} />
+              <View
+                style={[
+                  styles.unreadBadgePill,
+                  { backgroundColor: theme.base200, borderColor: theme.primary + '70' },
+                ]}
+              >
+                <Text style={[styles.unreadDividerText, { color: theme.primary }]}>
+                  Unread Messages
+                </Text>
+              </View>
+              <View style={[styles.unreadDividerLine, { backgroundColor: theme.primary + '50' }]} />
+            </View>
+          )}
+
+          <MessageBubble
+            message={item}
+            isSender={item.senderId === authUser?._id}
+            senderAvatar={selectedUser?.profilePic}
+          />
+        </View>
+      );
+    },
+    [authUser?._id, selectedUser?.profilePic, firstUnreadId, theme]
   );
 
   return (
@@ -120,7 +177,7 @@ export default function ChatConversationScreen() {
       <KeyboardAvoidingView
         style={styles.keyboardAvoid}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 25}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
       >
         {/* Messages List */}
         {isMessagesLoading ? (
@@ -140,7 +197,7 @@ export default function ChatConversationScreen() {
             contentContainerStyle={styles.listContent}
             onContentSizeChange={() => {
               if (messages.length > 0) {
-                flatListRef.current?.scrollToEnd({ animated: true });
+                flatListRef.current?.scrollToEnd({ animated: false });
               }
             }}
             onLayout={() => {
@@ -187,8 +244,31 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   listContent: {
-    paddingVertical: 12,
+    paddingVertical: 8,
     flexGrow: 1,
+  },
+  unreadDividerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 14,
+    paddingHorizontal: 16,
+    gap: 10,
+  },
+  unreadDividerLine: {
+    flex: 1,
+    height: 1,
+  },
+  unreadBadgePill: {
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  unreadDividerText: {
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
   },
   emptyContainer: {
     flex: 1,

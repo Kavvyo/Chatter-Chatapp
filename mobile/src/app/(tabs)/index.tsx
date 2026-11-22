@@ -66,10 +66,11 @@ export default function ChatsTab() {
   const onlineFriends = friends.filter((f) => onlineUsers.includes(f._id));
 
   const handleSelectChat = (user: ChatUser) => {
+    const unreadCount = unreadCounts[user._id] || 0;
     setSelectedUser(user);
     router.push({
       pathname: '/chat/[id]' as any,
-      params: { id: user._id },
+      params: { id: user._id, unreadCount: String(unreadCount) },
     });
   };
 

@@ -23,7 +23,7 @@ export const ThemedAlertModal: React.FC = () => {
   const isVisible = Boolean(alertConfig);
 
   useEffect(() => {
-    if (isVisible) {
+    if (alertConfig) {
       fadeAnim.setValue(0);
       scaleAnim.setValue(0.9);
       Animated.parallel([
@@ -40,7 +40,7 @@ export const ThemedAlertModal: React.FC = () => {
         }),
       ]).start();
     }
-  }, [isVisible]);
+  }, [alertConfig]);
 
   const handleClose = (callback?: () => void) => {
     Animated.parallel([
