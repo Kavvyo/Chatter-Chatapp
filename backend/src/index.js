@@ -20,9 +20,30 @@ const __dirname = path.resolve();
 
 app.use(express.json({ limit: '10mb' }));
 app.use(cookieparser());
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:8081",
+  "http://127.0.0.1:8081",
+  "http://localhost:5001",
+  process.env.CLIENT_URL,
+].filter(Boolean);
+
 app.use(cors({
-    origin: "http://localhost:5173",
-    credentials: true
+  origin: (origin, callback) => {
+    // allow non-browser requests (mobile native, curl, postman)
+    if (!origin) return callback(null, true);
+    if (
+      allowedOrigins.includes(origin) ||
+      origin.startsWith('http://localhost:') ||
+      origin.startsWith('http://127.0.0.1:') ||
+      origin.startsWith('http://192.168.')
+    ) {
+      return callback(null, true);
+    }
+    return callback(new Error('CORS origin not allowed: ' + origin), false);
+  },
+  credentials: true,
 }));
 
 app.use('/api/auth', authRoutes);

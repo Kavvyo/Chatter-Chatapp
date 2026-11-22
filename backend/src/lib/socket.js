@@ -32,7 +32,18 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
     cors: {
-        origin: [process.env.CLIENT_URL, "http://localhost:5173", "http://127.0.0.1:5173"].filter(Boolean),
+        origin: (origin, callback) => {
+            if (!origin) return callback(null, true);
+            if (
+                origin.startsWith('http://localhost:') ||
+                origin.startsWith('http://127.0.0.1:') ||
+                origin.startsWith('http://192.168.') ||
+                origin === process.env.CLIENT_URL
+            ) {
+                return callback(null, true);
+            }
+            return callback(new Error('CORS origin not allowed: ' + origin), false);
+        },
         credentials: true
     },
     transports: ["websocket", "polling"],
