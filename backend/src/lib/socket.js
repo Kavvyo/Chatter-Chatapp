@@ -56,8 +56,8 @@ const io = new Server(server, {
         credentials: true
     },
     transports: ["websocket", "polling"],
-    pingTimeout: 20000,
-    pingInterval: 10000,
+    pingTimeout: 10000,
+    pingInterval: 8000,
 });
 
 // Store connected sockets per user: userId -> Set<socket.id>
@@ -133,9 +133,7 @@ io.on("connection", (socket) => {
             });
 
             // Deliver immediately over live WebSocket before database write settles
-            if (userSocketsMap.has(targetId) && userSocketsMap.get(targetId).size > 0) {
-                io.to(targetId).emit("newMessage", wire);
-            }
+            io.to(targetId).emit("newMessage", wire);
             // Mirror across sender's other logged-in tabs/devices
             socket.to(senderId.toString()).emit("newMessage", wire);
 
@@ -153,13 +151,18 @@ io.on("connection", (socket) => {
     });
 
     // Fast WebSocket read-receipt sync
-    socket.on("markAsRead", async ({ to } = {}) => {
+    socket.on("markAsRead", async ({ to, messageIds } = {}) => {
         try {
             if (!socket.userId || !to) return;
-            await markConversationReadFast(to.toString(), socket.userId, io);
+            await markConversationReadFast(to.toString(), socket.userId, io, messageIds);
         } catch {
             // Safe fallback on next poll/open
         }
+    });
+
+    // Lightweight heartbeat probe so mobile clients recover immediately from OS-suspended sockets
+    socket.on("heartbeat", (ack) => {
+        if (typeof ack === "function") ack({ ok: true });
     });
 
     socket.on("disconnect", () => {

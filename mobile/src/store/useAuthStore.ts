@@ -1,3 +1,4 @@
+import { AppState } from 'react-native';
 import { create } from 'zustand';
 import { io, Socket } from 'socket.io-client';
 import { axiosInstance, clearAuthCookie, hasStoredAuthCookie } from '../lib/axios';
@@ -49,6 +50,22 @@ function hydrateDataStores(userId: string) {
     const { useChatStore } = require('./useChatStore');
     useFriendsStore.getState().hydrateFromCache(userId);
     useChatStore.getState().hydrateFromCache(userId);
+  } catch {
+    // ignore
+  }
+}
+
+let appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
+
+function syncChatStateOnActiveOrConnect() {
+  try {
+    const { useChatStore } = require('./useChatStore');
+    const chatState = useChatStore.getState();
+    chatState.fetchUnreadCounts();
+    if (chatState.selectedUser?._id) {
+      chatState.getMessages(chatState.selectedUser._id);
+      chatState.markMessageAsRead(chatState.selectedUser._id);
+    }
   } catch {
     // ignore
   }
@@ -234,6 +251,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         userId: authUser._id,
       },
       transports: ['websocket'],
+      reconnection: true,
+      reconnectionDelay: 500,
+      reconnectionDelayMax: 3000,
     });
 
     set({ socket });
@@ -253,7 +273,45 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       } catch {
         // ignore
       }
+
+      syncChatStateOnActiveOrConnect();
     });
+
+    if (!appStateSubscription) {
+      let lastAppState: string = AppState.currentState || 'active';
+      appStateSubscription = AppState.addEventListener('change', (nextState) => {
+        const wasBackground = lastAppState !== 'active';
+        lastAppState = nextState;
+        if (!wasBackground || nextState !== 'active') return;
+
+        const { authUser: currentUser, socket: activeSocket, connectSocket: ensureConnect } = get();
+        if (!currentUser) return;
+
+        if (!activeSocket) {
+          ensureConnect();
+          return;
+        }
+
+        if (!activeSocket.connected) {
+          activeSocket.connect();
+          return;
+        }
+
+        // Probe for OS-suspended zombie TCP sockets instead of waiting for pingTimeout
+        activeSocket.timeout(1200).emit('heartbeat', (err: any) => {
+          if (err) {
+            try {
+              activeSocket.disconnect();
+            } catch {
+              // ignore
+            }
+            activeSocket.connect();
+          } else {
+            syncChatStateOnActiveOrConnect();
+          }
+        });
+      });
+    }
   },
 
   disConnectSocket: () => {

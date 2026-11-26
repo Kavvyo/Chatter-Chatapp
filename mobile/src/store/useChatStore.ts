@@ -77,6 +77,16 @@ function getDeltaCursor(cached: Message[], myUserId?: string): string | null {
   return confirmed[confirmed.length - 1].createdAt;
 }
 
+const recentReadIds = new Set<string>();
+function rememberReadIds(ids: string[]) {
+  for (const id of ids) {
+    recentReadIds.add(id);
+  }
+  if (recentReadIds.size > 500) {
+    recentReadIds.clear();
+  }
+}
+
 interface ChatState {
   messages: Message[];
   messagesByUser: Record<string, Message[]>;
@@ -99,7 +109,7 @@ interface ChatState {
   setSelectedUser: (user: ChatUser | null) => void;
   deleteAllMessages: (userId: string) => Promise<void>;
   fetchUnreadCounts: () => Promise<void>;
-  markMessageAsRead: (userId: string) => Promise<void>;
+  markMessageAsRead: (userId: string, messageIds?: string[]) => Promise<void>;
   setIsTyping: (isTyping: boolean) => void;
   reset: () => void;
 }
@@ -205,6 +215,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
           if (myId) setCachedMessages(myId, peerId, merged);
           prefetchImageUrls(delta.map((m) => m.image));
+
+          if (get().selectedUser?._id === peerId) {
+            const unreadIncoming = delta
+              .filter((m) => m.senderId === peerId && !m.read)
+              .map((m) => m._id);
+            if (unreadIncoming.length > 0) {
+              get().markMessageAsRead(peerId, unreadIncoming);
+            }
+          }
         }
       } else {
         // 2b. Initial sync (fetch newest page of 50 messages)
@@ -224,6 +243,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         if (myId) setCachedMessages(myId, peerId, fetched);
         prefetchImageUrls(fetched.map((m) => m.image));
+
+        if (get().selectedUser?._id === peerId) {
+          const unreadIncoming = fetched
+            .filter((m) => m.senderId === peerId && !m.read)
+            .map((m) => m._id);
+          if (unreadIncoming.length > 0) {
+            get().markMessageAsRead(peerId, unreadIncoming);
+          }
+        }
       }
     } catch {
       // Stay cleanly on cached messages if offline
@@ -313,7 +341,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               settled = true;
               resolve(null);
             }
-          }, 3000);
+          }, 1500);
 
           socket.emit(
             'sendMessage',
@@ -337,18 +365,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().markMessageAsRead(peerId);
       }
 
+      const confirmedWithRead = recentReadIds.has(confirmed._id)
+        ? { ...confirmed, read: true }
+        : confirmed;
+
       set((state) => {
         const currentList = state.messagesByUser[peerId] || state.messages;
         const hasTarget = currentList.some(
-          (m) => m._id === tempId || m.localId === tempId || m._id === confirmed._id
+          (m) => m._id === tempId || m.localId === tempId || m._id === confirmedWithRead._id
         );
         const replaced = hasTarget
           ? currentList.map((m) =>
-              m._id === tempId || m.localId === tempId || m._id === confirmed._id
-                ? { ...confirmed, localId: m.localId || tempId, clientCreatedAt: m.clientCreatedAt }
+              m._id === tempId || m.localId === tempId || m._id === confirmedWithRead._id
+                ? {
+                    ...confirmedWithRead,
+                    localId: m.localId || tempId,
+                    clientCreatedAt: m.clientCreatedAt,
+                  }
                 : m
             )
-          : [...currentList, { ...confirmed, localId: tempId, clientCreatedAt: now }];
+          : [...currentList, { ...confirmedWithRead, localId: tempId, clientCreatedAt: now }];
         if (myId !== 'temp_me') setCachedMessages(myId, peerId, replaced);
         return {
           messages: state.selectedUser?._id === peerId ? replaced : state.messages,
@@ -439,8 +475,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           messagesByUser: { ...state.messagesByUser, [peerId]: updatedList },
           ...(isFromMe ? {} : { isTyping: false }),
         }));
-        if (!isFromMe) {
-          get().markMessageAsRead(selectedUser._id);
+        if (!isFromMe && newMessage._id) {
+          get().markMessageAsRead(selectedUser._id, [newMessage._id]);
         }
       } else if (!isFromMe) {
         const nextUnread = {
@@ -459,28 +495,50 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     });
 
-    socket.on('messageRead', async ({ readerId, messages: readMessages }: { readerId: string; messages: Message[] }) => {
-      const myId = useAuthStore.getState().authUser?._id;
-      const { messagesByUser, selectedUser } = get();
+    socket.on(
+      'messageRead',
+      async ({
+        readerId,
+        messages: readMessages = [],
+        messageIds = [],
+      }: {
+        readerId: string;
+        messages?: Array<{ _id?: string } | string>;
+        messageIds?: string[];
+      }) => {
+        const rId = readerId?.toString();
+        if (!rId) return;
 
-      let peerMessages = messagesByUser[readerId];
-      if ((!peerMessages || peerMessages.length === 0) && myId) {
-        peerMessages = (await getCachedMessages<Message>(myId, readerId)) || [];
+        const collectedIds = [
+          ...readMessages.map((r) => (typeof r === 'string' ? r : r?._id?.toString())),
+          ...messageIds.map((id) => id?.toString()),
+        ].filter((id): id is string => Boolean(id));
+
+        if (collectedIds.length === 0) return;
+        rememberReadIds(collectedIds);
+
+        const myId = useAuthStore.getState().authUser?._id;
+        const { messagesByUser, selectedUser } = get();
+
+        let peerMessages = messagesByUser[rId];
+        if ((!peerMessages || peerMessages.length === 0) && myId) {
+          peerMessages = (await getCachedMessages<Message>(myId, rId)) || [];
+        }
+
+        if (peerMessages && peerMessages.length > 0) {
+          const readSet = new Set(collectedIds);
+          const updated = peerMessages.map((msg) =>
+            readSet.has(msg._id?.toString()) ? { ...msg, read: true } : msg
+          );
+
+          if (myId) setCachedMessages(myId, rId, updated);
+          set((state) => ({
+            messagesByUser: { ...state.messagesByUser, [rId]: updated },
+            messages: selectedUser?._id?.toString() === rId ? updated : state.messages,
+          }));
+        }
       }
-
-      if (peerMessages && peerMessages.length > 0) {
-        const readSet = new Set(readMessages.map((r) => r._id));
-        const updated = peerMessages.map((msg) =>
-          readSet.has(msg._id) ? { ...msg, read: true } : msg
-        );
-
-        if (myId) setCachedMessages(myId, readerId, updated);
-        set((state) => ({
-          messagesByUser: { ...state.messagesByUser, [readerId]: updated },
-          messages: selectedUser?._id === readerId ? updated : state.messages,
-        }));
-      }
-    });
+    );
 
     socket.on('typing', ({ from }: { from: string }) => {
       const { selectedUser } = get();
@@ -542,19 +600,58 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  markMessageAsRead: async (userId: string) => {
+  markMessageAsRead: async (userId: string, messageIds?: string[]) => {
     if (!userId) return;
     const myId = useAuthStore.getState().authUser?._id;
+    const existingList = get().messagesByUser[userId] || [];
+    const localUnreadIds = existingList
+      .filter((m) => m.senderId === userId && !m.read && !m._id.startsWith('temp_'))
+      .map((m) => m._id);
+
+    const mergedIds = Array.from(
+      new Set([...(messageIds || []), ...localUnreadIds].filter((id) => id && !id.startsWith('temp_')))
+    );
 
     set((state) => {
       const nextUnread = { ...state.unreadCounts, [userId]: 0 };
       if (myId) setCachedUnreadCounts(myId, nextUnread);
-      return { unreadCounts: nextUnread };
+
+      const list = state.messagesByUser[userId];
+      if (!list || list.length === 0) {
+        return { unreadCounts: nextUnread };
+      }
+
+      const idSet = mergedIds.length > 0 ? new Set(mergedIds) : null;
+      let changed = false;
+      const updated = list.map((m) => {
+        if (m.senderId === userId && !m.read && (!idSet || idSet.has(m._id))) {
+          changed = true;
+          return { ...m, read: true };
+        }
+        return m;
+      });
+
+      if (changed && myId) {
+        setCachedMessages(myId, userId, updated);
+      }
+
+      return {
+        unreadCounts: nextUnread,
+        ...(changed
+          ? {
+              messagesByUser: { ...state.messagesByUser, [userId]: updated },
+              messages: state.selectedUser?._id === userId ? updated : state.messages,
+            }
+          : {}),
+      };
     });
 
     const socket = useAuthStore.getState().socket;
     if (socket?.connected) {
-      socket.emit('markAsRead', { to: userId });
+      socket.emit('markAsRead', {
+        to: userId,
+        ...(mergedIds.length > 0 ? { messageIds: mergedIds } : {}),
+      });
       return;
     }
 

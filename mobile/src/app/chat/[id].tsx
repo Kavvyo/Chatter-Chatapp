@@ -36,7 +36,6 @@ export default function ChatConversationScreen() {
     setSelectedUser,
     isTyping,
     deleteAllMessages,
-    subscribeToMessages,
     markMessageAsRead,
     users,
     getUsers,
@@ -84,20 +83,24 @@ export default function ChatConversationScreen() {
       lastNewestKeyRef.current = null;
       setFirstUnreadId(null);
       getMessages(id);
-      subscribeToMessages();
     }
-  }, [id, socket]);
+
+    return () => {
+      if (id && useChatStore.getState().selectedUser?._id === id) {
+        setSelectedUser(null);
+      }
+    };
+  }, [id]);
 
   // Capture the first unread message on initial 1st view only, then mark as read
   useEffect(() => {
     if (!unreadEvaluatedRef.current && messages.length > 0 && id) {
       unreadEvaluatedRef.current = true;
       const count = initialUnreadCountRef.current;
+      const incomingMessages = messages.filter((m) => m.senderId !== authUser?._id);
+      const unreadIncoming = incomingMessages.filter((m) => !m.read);
 
       if (count > 0 && authUser) {
-        const incomingMessages = messages.filter((m) => m.senderId !== authUser._id);
-        const unreadIncoming = incomingMessages.filter((m) => !m.read);
-
         const target =
           unreadIncoming.length > 0
             ? unreadIncoming[0]
@@ -108,7 +111,10 @@ export default function ChatConversationScreen() {
         }
       }
 
-      markMessageAsRead(id);
+      const unreadIds = unreadIncoming
+        .map((m) => m._id)
+        .filter((mid) => !mid.startsWith('temp_'));
+      markMessageAsRead(id, unreadIds.length > 0 ? unreadIds : undefined);
       initialUnreadCountRef.current = 0;
     }
   }, [messages, id, authUser]);

@@ -4,6 +4,8 @@ import { axiosInstanace } from "../lib/axios";
 import {useAuthStore} from './useAuthStore';
 
 
+const recentReadIds = new Set();
+
 export const useChatStore = create((set, get) => ({
     messages: [],
     users: [],
@@ -79,7 +81,7 @@ export const useChatStore = create((set, get) => ({
                             settled = true;
                             resolve(null);
                         }
-                    }, 3000);
+                    }, 1500);
 
                     socket.emit(
                         "sendMessage",
@@ -99,11 +101,15 @@ export const useChatStore = create((set, get) => ({
                 confirmed = res.data;
             }
 
+            const confirmedWithRead = recentReadIds.has(confirmed._id?.toString())
+                ? { ...confirmed, read: true }
+                : confirmed;
+
             set((state) => {
                 if (state.selectedUser?._id !== peerId) return state;
                 const replaced = state.messages.map((m) =>
-                    m._id === tempId || m.localId === tempId || m._id === confirmed._id
-                        ? { ...confirmed, localId: m.localId || tempId }
+                    m._id === tempId || m.localId === tempId || m._id === confirmedWithRead._id
+                        ? { ...confirmedWithRead, localId: m.localId || tempId }
                         : m
                 );
                 return { messages: replaced };
@@ -150,8 +156,8 @@ export const useChatStore = create((set, get) => ({
                         : [...messages, newMessage];
                 set({ messages: updatedMessages });
 
-                if (!isFromMe) {
-                    get().markMessageAsRead(selectedUser._id);
+                if (!isFromMe && newMessage._id) {
+                    get().markMessageAsRead(selectedUser._id, [newMessage._id]);
                 }
             } else if (!isFromMe) {
                 const currentCount = unreadCounts[peerId] || 0;
@@ -159,15 +165,23 @@ export const useChatStore = create((set, get) => ({
             }
         });
 
-        socket.on("messageRead", ({ readerId, messages: readMessages }) => {
+        socket.on("messageRead", ({ readerId, messages: readMessages = [], messageIds = [] }) => {
             const { messages: currentMessages, selectedUser } = get();
+            const rId = readerId?.toString();
+            const collected = [
+                ...readMessages.map((r) => (typeof r === "string" ? r : r?._id?.toString())),
+                ...messageIds.map((id) => id?.toString()),
+            ].filter(Boolean);
 
+            if (collected.length === 0) return;
+            collected.forEach((id) => recentReadIds.add(id));
+            if (recentReadIds.size > 500) recentReadIds.clear();
 
-            if (selectedUser && selectedUser._id === readerId) {
-                const updatedMessages = currentMessages.map(msg => {
-                    const found = readMessages.find(read => read._id?.toString() === msg._id?.toString());
-                    return found ? { ...msg, read: true } : msg;
-                });
+            if (selectedUser && selectedUser._id?.toString() === rId) {
+                const readSet = new Set(collected);
+                const updatedMessages = currentMessages.map((msg) =>
+                    readSet.has(msg._id?.toString()) ? { ...msg, read: true } : msg
+                );
 
                 set({ messages: updatedMessages });
             }
@@ -222,11 +236,14 @@ export const useChatStore = create((set, get) => ({
         }
     },
 
-    markMessageAsRead : async (userId) => {
+    markMessageAsRead : async (userId, messageIds) => {
         if (!userId) return;
         const socket = useAuthStore.getState().socket;
         if (socket?.connected) {
-            socket.emit("markAsRead", { to: userId });
+            socket.emit("markAsRead", {
+                to: userId,
+                ...(Array.isArray(messageIds) && messageIds.length > 0 ? { messageIds } : {}),
+            });
             return;
         }
         try {
