@@ -72,3 +72,11 @@ export const clearAuthCookie = async () => {
   storedCookie = null;
   await safeRemoveStorage('auth_cookie');
 };
+
+export const hasStoredAuthCookie = async (): Promise<boolean> => {
+  if (Platform.OS === 'web') return true;
+  if (!storedCookie) {
+    storedCookie = await safeGetStorage('auth_cookie');
+  }
+  return Boolean(storedCookie);
+};

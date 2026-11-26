@@ -23,7 +23,7 @@ type FilterType = 'all' | 'online' | 'unread';
 export default function ChatsTab() {
   const router = useRouter();
   const { theme } = useThemeStore();
-  const { setSelectedUser, unreadCounts, fetchUnreadCounts, getUsers } = useChatStore();
+  const { setSelectedUser, unreadCounts, fetchUnreadCounts } = useChatStore();
   const { friends, getFriends } = useFriendsStore();
   const { authUser, onlineUsers } = useAuthStore();
 
@@ -32,14 +32,15 @@ export default function ChatsTab() {
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
-    getFriends();
-    getUsers();
+    if (!authUser?._id) return;
+    // Cached friends & unread counts render immediately; sync updates quietly in background
+    getFriends(true);
     fetchUnreadCounts();
-  }, []);
+  }, [authUser?._id]);
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await Promise.all([getFriends(), getUsers(), fetchUnreadCounts()]);
+    await Promise.all([getFriends(true), fetchUnreadCounts()]);
     setRefreshing(false);
   };
 

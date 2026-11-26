@@ -2,6 +2,14 @@ import { Server } from 'socket.io';
 import http from 'http';
 import express from 'express';
 import { AccessToken } from 'livekit-server-sdk';
+import User from '../models/user.model.js';
+import { sendIncomingCallPush, sendMissedCallPush } from './pushNotifications.js';
+import { checkAreFriends } from './friendshipCache.js';
+import {
+    buildMessagePayload,
+    persistMessageInBackground,
+    markConversationReadFast,
+} from './messageService.js';
 
 async function generateCallToken(identity, name, roomName) {
     const apiKey = process.env.LIVEKIT_API_KEY;
@@ -54,6 +62,8 @@ const io = new Server(server, {
 
 // Store connected sockets per user: userId -> Set<socket.id>
 const userSocketsMap = new Map();
+// Track active offline pushed calls so hangup converts notification to "Missed call"
+const pendingPushedCalls = new Map();
 
 export function getReciverSocketId(userId) {
     if (!userId) return null;
@@ -94,6 +104,64 @@ io.on("connection", (socket) => {
         }
     });
 
+    // Fast WebSocket-first text message relay with silent background MongoDB persistence
+    socket.on("sendMessage", async ({ to, text, localId } = {}, ack) => {
+        try {
+            const senderId = socket.userId;
+            if (!senderId || !to) {
+                if (typeof ack === "function") ack({ ok: false, message: "Invalid sender or recipient" });
+                return;
+            }
+
+            const cleanText = typeof text === "string" ? text.trim() : "";
+            if (!cleanText) {
+                if (typeof ack === "function") ack({ ok: false, message: "Message text is required" });
+                return;
+            }
+
+            const targetId = to.toString();
+            const areFriends = await checkAreFriends(senderId, targetId);
+            if (!areFriends) {
+                if (typeof ack === "function") ack({ ok: false, message: "You must be friends to send a message." });
+                return;
+            }
+
+            const { doc, wire } = buildMessagePayload({
+                senderId,
+                receiverId: targetId,
+                text: cleanText,
+            });
+
+            // Deliver immediately over live WebSocket before database write settles
+            if (userSocketsMap.has(targetId) && userSocketsMap.get(targetId).size > 0) {
+                io.to(targetId).emit("newMessage", wire);
+            }
+            // Mirror across sender's other logged-in tabs/devices
+            socket.to(senderId.toString()).emit("newMessage", wire);
+
+            if (typeof ack === "function") {
+                ack({ ok: true, message: wire, localId });
+            }
+
+            // Persist silently in background
+            persistMessageInBackground(doc);
+        } catch (err) {
+            if (typeof ack === "function") {
+                ack({ ok: false, message: err?.message || "Failed to relay message" });
+            }
+        }
+    });
+
+    // Fast WebSocket read-receipt sync
+    socket.on("markAsRead", async ({ to } = {}) => {
+        try {
+            if (!socket.userId || !to) return;
+            await markConversationReadFast(to.toString(), socket.userId, io);
+        } catch {
+            // Safe fallback on next poll/open
+        }
+    });
+
     socket.on("disconnect", () => {
         console.log("A user disconnected", socket.id);
         if (socket.userId) {
@@ -113,6 +181,7 @@ io.on("connection", (socket) => {
     socket.on("callUser", async ({ userToCall, roomName, from, name, avatar, callType, receiverName }, ack) => {
         if (!userToCall || !roomName) return;
         const targetId = userToCall.toString();
+        const callerId = (from || socket.userId || "").toString();
 
         // Prevent self-calling loop
         if (targetId === socket.userId) {
@@ -122,8 +191,18 @@ io.on("connection", (socket) => {
         }
 
         const isOnline = userSocketsMap.has(targetId) && userSocketsMap.get(targetId).size > 0;
+        let targetPushToken = "";
 
         if (!isOnline) {
+            try {
+                const targetUser = await User.findById(targetId).select("expoPushToken").lean();
+                targetPushToken = targetUser?.expoPushToken || "";
+            } catch {
+                targetPushToken = "";
+            }
+        }
+
+        if (!isOnline && !targetPushToken) {
             socket.emit("callFailed", { reason: "offline", message: "User is currently offline" });
             if (typeof ack === "function") ack({ ok: false, reason: "offline" });
             return;
@@ -131,20 +210,46 @@ io.on("connection", (socket) => {
 
         // Sign both caller & receiver LiveKit JWT tokens in parallel (~0.5ms, zero DB query)
         const [callerAuth, receiverAuth] = await Promise.all([
-            generateCallToken(from || socket.userId, name, roomName),
+            generateCallToken(callerId, name, roomName),
             generateCallToken(targetId, receiverName || "User", roomName),
         ]);
 
-        // Notify all devices/tabs of the target user with their token already bundled
-        socket.to(targetId).emit("incomingCall", {
-            roomName,
-            from,
-            name,
-            avatar,
-            callType: callType || "video",
-            token: receiverAuth?.token || null,
-            url: receiverAuth?.url || null,
-        });
+        // Notify any online devices/tabs immediately via Socket.IO
+        if (isOnline) {
+            socket.to(targetId).emit("incomingCall", {
+                roomName,
+                from: callerId,
+                name,
+                avatar,
+                callType: callType || "video",
+                token: receiverAuth?.token || null,
+                url: receiverAuth?.url || null,
+            });
+        }
+
+        // Send high-priority push notification to wake killed/backgrounded mobile devices
+        if (!isOnline && targetPushToken) {
+            const pushKey = `${callerId}:${targetId}`;
+            pendingPushedCalls.set(pushKey, {
+                expoPushToken: targetPushToken,
+                callerId,
+                callerName: name || "Incoming Caller",
+                callType: callType || "video",
+                roomName,
+            });
+            setTimeout(() => pendingPushedCalls.delete(pushKey), 50000);
+
+            sendIncomingCallPush({
+                expoPushToken: targetPushToken,
+                roomName,
+                callerId,
+                callerName: name,
+                callerAvatar: avatar,
+                callType: callType || "video",
+                receiverToken: receiverAuth?.token || null,
+                livekitUrl: receiverAuth?.url || null,
+            });
+        }
 
         // Immediately return caller's token via ack callback
         if (typeof ack === "function") {
@@ -157,6 +262,9 @@ io.on("connection", (socket) => {
     });
 
     socket.on("answerCall", ({ to, roomName }) => {
+        if (to && socket.userId) {
+            pendingPushedCalls.delete(`${to.toString()}:${socket.userId}`);
+        }
         if (to) {
             socket.to(to.toString()).emit("callAccepted", { roomName });
         }
@@ -167,6 +275,9 @@ io.on("connection", (socket) => {
     });
 
     socket.on("rejectCall", ({ to }) => {
+        if (to && socket.userId) {
+            pendingPushedCalls.delete(`${to.toString()}:${socket.userId}`);
+        }
         if (to) {
             socket.to(to.toString()).emit("callRejected");
         }
@@ -184,7 +295,15 @@ io.on("connection", (socket) => {
 
     socket.on("endCall", ({ to }) => {
         if (to) {
-            socket.to(to.toString()).emit("callEnded");
+            const targetId = to.toString();
+            const callerId = socket.userId?.toString() || "";
+            const pushKey = `${callerId}:${targetId}`;
+            const pushedCall = pendingPushedCalls.get(pushKey);
+            if (pushedCall) {
+                pendingPushedCalls.delete(pushKey);
+                sendMissedCallPush(pushedCall);
+            }
+            socket.to(targetId).emit("callEnded");
         }
     });
 });

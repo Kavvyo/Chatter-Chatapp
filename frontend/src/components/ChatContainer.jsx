@@ -6,7 +6,7 @@ import MessageSkeleton from "./Skeletons/MessageSkeleton";
 import { useAuthStore } from "../store/useAuthStore";
 import { formatMessageTime } from "../lib/utils";
 import ScrollToTheBottom from "./ScrollToTheBottom";
-import { Check, CheckCheck } from "lucide-react";
+import { Check, CheckCheck, Clock } from "lucide-react";
 
 function ChatContainer() {
   const {messages, getMessages, isMessagesLoading, selectedUser, subscribeToMessages, unSubscribeFromMessages} = useChatStore();
@@ -39,12 +39,20 @@ function ChatContainer() {
       }
     };
 
+    const handleIncomingMessage = (newMessage) => {
+      if (newMessage?.senderId?.toString() === selectedUser._id.toString()) {
+        setIsTyping(false);
+      }
+    };
+
     socket.on("typing", handleTyping);
     socket.on("stopTyping", handleStopTyping);
+    socket.on("newMessage", handleIncomingMessage);
 
     return () => {
       socket.off("typing", handleTyping);
       socket.off("stopTyping", handleStopTyping);
+      socket.off("newMessage", handleIncomingMessage);
     };
   }, [socket, selectedUser]);
 
@@ -80,7 +88,7 @@ function ChatContainer() {
       <div className="flex-1 overflow-y-auto p-4 space-y-2 chat-scroll-container relative max-sm:bottom-14">
         {messages.map((message) => (
           <div
-            key={message._id}
+            key={message.localId || message._id}
             className={`chat ${message.senderId === authUser._id ? "chat-end": "chat-start"}`}
              
             >
@@ -100,11 +108,13 @@ function ChatContainer() {
               {message.text && <p>{message.text}</p>}
               
               <div className={`chat-footer justify-end ${message.senderId === authUser._id ? "flex" : "hidden"}`}>
-
-                {message.read ?  
-                  <CheckCheck className="size-[1.2rem] text-primary-content/80" /> 
-                  : <Check className="size-[1.2rem] text-primary-content/80"/>}
-                
+                {message._id?.toString().startsWith("temp_") ? (
+                  <Clock className="size-4 text-primary-content/70" />
+                ) : message.read ? (
+                  <CheckCheck className="size-[1.2rem] text-primary-content/80" />
+                ) : (
+                  <Check className="size-[1.2rem] text-primary-content/80" />
+                )}
               </div>
                 
 
@@ -114,17 +124,16 @@ function ChatContainer() {
         ))}
 
         {isTyping && (
-          <div className="chat-start flex gap-3 animate-pulse">
+          <div className="chat chat-start">
             <div className="chat-image avatar">
-              <div className="size-5 rounded-full border border-gray-700">
-                <img src={messages.senderId === authUser._id ? authUser.profilePic || "/avatar.png" 
-                          : selectedUser.profilePic || "/avatar.png"} alt="profile pic" />
+              <div className="size-10 rounded-full border border-gray-700">
+                <img src={selectedUser.profilePic || "/avatar.png"} alt="profile pic" />
               </div>
             </div>
-            <div className="chat-bubble flex flex-col justify-center min-h-[0.5rem]">
-            <p className="text-sm text-base-content/70">
-                <i>typing... </i>
-              </p>
+            <div className="chat-bubble bg-base-300 flex items-center gap-1.5 py-3 px-4">
+              <span className="size-2 rounded-full bg-base-content/60 animate-bounce [animation-delay:0ms]" />
+              <span className="size-2 rounded-full bg-base-content/60 animate-bounce [animation-delay:150ms]" />
+              <span className="size-2 rounded-full bg-base-content/60 animate-bounce [animation-delay:300ms]" />
             </div>
           </div>
         )}

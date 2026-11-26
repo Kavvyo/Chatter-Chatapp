@@ -1,6 +1,15 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, Image, TouchableOpacity, Modal } from 'react-native';
-import { Check, CheckCheck, X } from 'lucide-react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  Modal,
+  Animated,
+  Easing,
+} from 'react-native';
+import { Image } from 'expo-image';
+import { Check, CheckCheck, Clock, X } from 'lucide-react-native';
 import { Message } from '../../store/useChatStore';
 import { useThemeStore } from '../../store/useThemeStore';
 import Avatar from '../ui/Avatar';
@@ -22,8 +31,65 @@ export const MessageBubble = React.memo<MessageBubbleProps>(
     const { theme } = useThemeStore();
     const [imageModalVisible, setImageModalVisible] = useState(false);
 
+    // Animate only newly sent/received live messages on mount (skip cached/historical ones)
+    const shouldAnimateOnMount = useRef(
+      Boolean(message.clientCreatedAt && Date.now() - message.clientCreatedAt < 10_000)
+    ).current;
+
+    const opacity = useRef(new Animated.Value(shouldAnimateOnMount ? 0 : 1)).current;
+    const translateY = useRef(new Animated.Value(shouldAnimateOnMount ? 18 : 0)).current;
+    const translateX = useRef(
+      new Animated.Value(shouldAnimateOnMount ? (isSender ? 12 : -12) : 0)
+    ).current;
+    const scale = useRef(new Animated.Value(shouldAnimateOnMount ? 0.92 : 1)).current;
+
+    useEffect(() => {
+      if (!shouldAnimateOnMount) return;
+
+      Animated.parallel([
+        Animated.timing(opacity, {
+          toValue: 1,
+          duration: 180,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.spring(translateY, {
+          toValue: 0,
+          damping: 18,
+          stiffness: 240,
+          mass: 0.72,
+          useNativeDriver: true,
+        }),
+        Animated.spring(translateX, {
+          toValue: 0,
+          damping: 18,
+          stiffness: 240,
+          mass: 0.72,
+          useNativeDriver: true,
+        }),
+        Animated.spring(scale, {
+          toValue: 1,
+          damping: 16,
+          stiffness: 250,
+          mass: 0.68,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }, [shouldAnimateOnMount, opacity, translateY, translateX, scale]);
+
+    const isPending = message._id.startsWith('temp_');
+
     return (
-      <View style={[styles.row, isSender ? styles.senderRow : styles.receiverRow]}>
+      <Animated.View
+        style={[
+          styles.row,
+          isSender ? styles.senderRow : styles.receiverRow,
+          {
+            opacity,
+            transform: [{ translateY }, { translateX }, { scale }],
+          },
+        ]}
+      >
         {/* Sender Avatar for incoming message */}
         {!isSender && (
           <Avatar uri={senderAvatar} size={30} style={styles.bubbleAvatar} />
@@ -37,11 +103,17 @@ export const MessageBubble = React.memo<MessageBubbleProps>(
               : [styles.receiverBubble, { backgroundColor: theme.base300 }],
           ]}
         >
-          {/* Attached Image */}
+          {/* Attached Image (cached permanently to memory & disk) */}
           {message.image && (
             <>
               <TouchableOpacity onPress={() => setImageModalVisible(true)} activeOpacity={0.9}>
-                <Image source={{ uri: message.image }} style={styles.messageImage} resizeMode="cover" />
+                <Image
+                  source={{ uri: message.image }}
+                  style={styles.messageImage}
+                  contentFit="cover"
+                  cachePolicy="memory-disk"
+                  transition={150}
+                />
               </TouchableOpacity>
 
               <Modal visible={imageModalVisible} transparent statusBarTranslucent={true} animationType="fade">
@@ -49,7 +121,12 @@ export const MessageBubble = React.memo<MessageBubbleProps>(
                   <TouchableOpacity onPress={() => setImageModalVisible(false)} style={styles.closeBtn}>
                     <X size={24} color="#ffffff" />
                   </TouchableOpacity>
-                  <Image source={{ uri: message.image }} style={styles.fullImage} resizeMode="contain" />
+                  <Image
+                    source={{ uri: message.image }}
+                    style={styles.fullImage}
+                    contentFit="contain"
+                    cachePolicy="memory-disk"
+                  />
                 </View>
               </Modal>
             </>
@@ -80,7 +157,9 @@ export const MessageBubble = React.memo<MessageBubbleProps>(
 
             {isSender && (
               <View style={styles.receipt}>
-                {message.read ? (
+                {isPending ? (
+                  <Clock size={12} color={theme.primaryContent + '85'} />
+                ) : message.read ? (
                   <CheckCheck size={14} color={theme.primaryContent} />
                 ) : (
                   <Check size={14} color={theme.primaryContent + '90'} />
@@ -89,7 +168,7 @@ export const MessageBubble = React.memo<MessageBubbleProps>(
             )}
           </View>
         </View>
-      </View>
+      </Animated.View>
     );
   },
   (prev, next) =>

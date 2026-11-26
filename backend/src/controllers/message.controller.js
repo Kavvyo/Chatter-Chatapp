@@ -4,6 +4,12 @@ import cloudinary from "../lib/cloudinary.js";
 import { getReciverSocketId, io } from "../lib/socket.js";
 import Friendship from "../models/friendships.model.js";
 import mongoose from "mongoose";
+import { checkAreFriends } from "../lib/friendshipCache.js";
+import {
+    buildMessagePayload,
+    persistMessageInBackground,
+    markConversationReadFast,
+} from "../lib/messageService.js";
 
 export const getUserForSidebar = async (req, res) => {
     try {
@@ -18,22 +24,55 @@ export const getUserForSidebar = async (req, res) => {
 
 export const getMessages = async (req, res) => {
     try {
-        const {id: userToChatId} = req.params;
+        const { id: userToChatId } = req.params;
+        const { after, before, limit } = req.query;
         const myId = req.user._id;
 
-        const messages = await Message.find({
-                $or:[
-                    {senderId: myId, receiverId: userToChatId},
-                    {senderId: userToChatId, receiverId: myId}
-                ]
-        });
+        const baseFilter = {
+            $or: [
+                { senderId: myId, receiverId: userToChatId },
+                { senderId: userToChatId, receiverId: myId },
+            ],
+        };
 
+        // Incremental delta sync: fetch only messages created after a cursor timestamp
+        if (typeof after === "string" && after.trim()) {
+            const afterDate = new Date(after);
+            if (!Number.isNaN(afterDate.getTime())) {
+                const deltaMessages = await Message.find({
+                    ...baseFilter,
+                    createdAt: { $gt: afterDate },
+                }).sort({ createdAt: 1 });
+                return res.status(200).json(deltaMessages);
+            }
+        }
+
+        // Paginated older slice or initial recent page
+        const parsedLimit = Number.parseInt(limit, 10);
+        if (!Number.isNaN(parsedLimit) && parsedLimit > 0) {
+            const safeLimit = Math.min(parsedLimit, 200);
+            const queryFilter = { ...baseFilter };
+
+            if (typeof before === "string" && before.trim()) {
+                const beforeDate = new Date(before);
+                if (!Number.isNaN(beforeDate.getTime())) {
+                    queryFilter.createdAt = { $lt: beforeDate };
+                }
+            }
+
+            const recentDesc = await Message.find(queryFilter)
+                .sort({ createdAt: -1 })
+                .limit(safeLimit);
+
+            return res.status(200).json(recentDesc.reverse());
+        }
+
+        // Default unpaginated response (100% backward compatible with Web client)
+        const messages = await Message.find(baseFilter).sort({ createdAt: 1 });
         res.status(200).json(messages);
-
-
     } catch (error) {
         console.log('Error in Getmessages: ', error.message);
-        res.status(500).json({message: 'Internal Server Error'});
+        res.status(500).json({ message: 'Internal Server Error' });
     }
 }
 
@@ -43,39 +82,27 @@ export const sendMessages = async (req, res) => {
         const {id: receiverId} = req.params;
         const senderId = req.user._id;
 
+        const areFriends = await checkAreFriends(senderId, receiverId);
+        if (!areFriends) {
+            return res.status(403).json({ message: "You must be friends to send a message." });
+        }
+
         let imageUrl;
         if(image){
             const uploadResponse = await cloudinary.uploader.upload(image);
             imageUrl = uploadResponse.secure_url;
         }
 
-        const newMessage = new Message({
-            senderId,
-            receiverId,
-            text,
-            image: imageUrl,
-            read: false,
-        });
+        const { doc, wire } = buildMessagePayload({ senderId, receiverId, text, imageUrl });
 
-        const areFriends = await Friendship.findOne({
-            $or: [
-              { requester: senderId, recipient: receiverId, status: "accepted" },
-              { requester: receiverId, recipient: senderId, status: "accepted" }
-            ]
-        });
-          
-        if (!areFriends) {
-            return res.status(403).json({ message: "You must be friends to send a message." });
-        }          
-
-        await newMessage.save();
-
+        // Relay over Socket.IO and respond immediately, persisting asynchronously to MongoDB
         const reciverSocketId = getReciverSocketId(receiverId);
         if(reciverSocketId){
-            io.to(reciverSocketId).emit("newMessage", newMessage); 
+            io.to(reciverSocketId).emit("newMessage", wire);
         }
 
-        res.status(200).json(newMessage);
+        res.status(200).json(wire);
+        persistMessageInBackground(doc);
         
     } catch (error) {
         console.log('Error in sendMessages ', error.message);
@@ -131,25 +158,7 @@ export const markMessagesAsRead = async (req, res) => {
         const receiverId = req.user._id;
         const senderId = req.params.id;
 
-        await Message.updateMany(
-            { senderId, receiverId, read: false },
-            { $set: { read: true } }
-        );
-
-        const updatedMessages = await Message.find({
-            senderId,
-            receiverId,
-            read: true
-        });
-
-        const senderSocketId = getReciverSocketId(senderId);
-        if (senderSocketId) {
-            io.to(senderSocketId).emit("messageRead", {
-                readerId: receiverId,
-                messages: updatedMessages,
-            });
-        }
-
+        await markConversationReadFast(senderId, receiverId, io);
 
         res.status(200).json({ message: "Messages marked as read" });
     } catch (error) {

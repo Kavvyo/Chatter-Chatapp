@@ -1,5 +1,6 @@
 import { getReciverSocketId, io } from "../lib/socket.js";
 import Friendship from "../models/friendships.model.js"
+import { setFriendshipCache, invalidateFriendshipCache } from "../lib/friendshipCache.js";
 
 export const getFriends = async (req, res) => {
     try {
@@ -87,6 +88,7 @@ export const acceptFriendRequest = async (req, res) => {
         );
   
         if (!friendship) return res.status(404).json({ message: "Friend request not found." });
+        setFriendshipCache(requesterId, recipientId, true);
         res.status(200).json(friendship);
 
         const requesterSocketId = getReciverSocketId(requesterId);
@@ -155,6 +157,7 @@ export const unfriendUser = async (req, res) => {
         if (!deleted) {
             return res.status(404).json({ message: "User is already unfriended" });
         }
+        invalidateFriendshipCache(requesterId, recipientId);
 
         const requesterSocketId = getReciverSocketId(requesterId);
         if(requesterSocketId){

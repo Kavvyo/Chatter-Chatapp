@@ -1,5 +1,5 @@
 import express from 'express';
-import { signup, login, logout, updateProfile, checkAuth, verifyOtp, resendOtp, updateFullname } from '../controllers/auth.controller.js';
+import { signup, login, logout, updateProfile, checkAuth, verifyOtp, resendOtp, updateFullname, savePushToken } from '../controllers/auth.controller.js';
 import { protectRoute } from '../middleware/auth.middleware.js';
 
 const router = express.Router();
@@ -12,6 +12,7 @@ router.post('/resend-otp', resendOtp);
 
 router.put('/update-profile', protectRoute, updateProfile);
 router.put('/update-fullname', protectRoute, updateFullname);
+router.put('/push-token', protectRoute, savePushToken);
 router.get('/check', protectRoute, checkAuth);
 
 export default router;

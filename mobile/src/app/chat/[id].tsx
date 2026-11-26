@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback, useState } from 'react';
+import React, { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -7,10 +7,11 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
+  TouchableOpacity,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
-import { useChatStore } from '../../store/useChatStore';
+import { useChatStore, type Message } from '../../store/useChatStore';
 import { useFriendsStore } from '../../store/useFriendsStore';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useThemeStore } from '../../store/useThemeStore';
@@ -18,6 +19,7 @@ import { useToastStore } from '../../store/useToastStore';
 import { ChatHeader } from '../../components/chat/ChatHeader';
 import { MessageBubble } from '../../components/chat/MessageBubble';
 import { MessageInput } from '../../components/chat/MessageInput';
+import { TypingIndicator } from '../../components/chat/TypingIndicator';
 
 export default function ChatConversationScreen() {
   const { id, unreadCount: paramUnreadCount } = useLocalSearchParams<{ id: string; unreadCount?: string }>();
@@ -26,26 +28,33 @@ export default function ChatConversationScreen() {
   const {
     messages,
     getMessages,
+    loadOlderMessages,
+    hasMoreOlderByUser,
     isMessagesLoading,
+    isLoadingOlder,
     selectedUser,
     setSelectedUser,
     isTyping,
     deleteAllMessages,
     subscribeToMessages,
     markMessageAsRead,
-    unreadCounts,
     users,
     getUsers,
   } = useChatStore();
-  const { friends, getFriends } = useFriendsStore();
+  const { friends } = useFriendsStore();
   const { showAlert, showToast } = useToastStore();
 
-  const flatListRef = useRef<FlatList>(null);
+  const flatListRef = useRef<FlatList<Message>>(null);
   const initialUnreadCountRef = useRef<number>(
     parseInt(paramUnreadCount || '0', 10) || (id ? useChatStore.getState().unreadCounts[id] || 0 : 0)
   );
   const [firstUnreadId, setFirstUnreadId] = useState<string | null>(null);
   const unreadEvaluatedRef = useRef(false);
+  const lastNewestKeyRef = useRef<string | null>(null);
+  const hasMoreOlder = id ? hasMoreOlderByUser[id] === true : false;
+
+  // Inverted list expects [newest, ..., oldest] so recent messages anchor at bottom in 0ms
+  const reversedMessages = useMemo(() => [...messages].reverse(), [messages]);
 
   // Sync selected user from id if missing
   useEffect(() => {
@@ -59,7 +68,6 @@ export default function ChatConversationScreen() {
       if (found) {
         setSelectedUser(found);
       } else {
-        // Fetch users to populate
         getUsers().then(() => {
           const userList = useChatStore.getState().users;
           const userFound = userList.find((u) => u._id === id);
@@ -69,10 +77,12 @@ export default function ChatConversationScreen() {
     }
   }, [id, friends, users]);
 
-  // Load messages and subscribe on screen mount
+  // Load cached messages immediately + run silent delta sync on mount
   useEffect(() => {
     if (id) {
       unreadEvaluatedRef.current = false;
+      lastNewestKeyRef.current = null;
+      setFirstUnreadId(null);
       getMessages(id);
       subscribeToMessages();
     }
@@ -85,7 +95,6 @@ export default function ChatConversationScreen() {
       const count = initialUnreadCountRef.current;
 
       if (count > 0 && authUser) {
-        // Filter incoming messages from other user
         const incomingMessages = messages.filter((m) => m.senderId !== authUser._id);
         const unreadIncoming = incomingMessages.filter((m) => !m.read);
 
@@ -99,21 +108,29 @@ export default function ChatConversationScreen() {
         }
       }
 
-      // Mark as read in DB and clear unread counts locally so subsequent views don't show divider
       markMessageAsRead(id);
       initialUnreadCountRef.current = 0;
     }
   }, [messages, id, authUser]);
 
-  // Auto-scroll reliably to the latest messages at the bottom
+  // Snap smoothly to newest message (offset 0 in inverted list) ONLY when sending a live message
+  const newestItem = reversedMessages[0];
+  const newestKey = newestItem ? newestItem.localId || newestItem._id : null;
   useEffect(() => {
-    if (messages.length > 0) {
-      const timer = setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      }, 80);
-      return () => clearTimeout(timer);
+    if (!newestItem || !newestKey) return;
+
+    if (lastNewestKeyRef.current && newestKey !== lastNewestKeyRef.current) {
+      if (newestItem.clientCreatedAt && newestItem.senderId === authUser?._id) {
+        flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+      }
     }
-  }, [messages.length]);
+    lastNewestKeyRef.current = newestKey;
+  }, [newestKey, newestItem, authUser?._id]);
+
+  const handleLoadOlder = async () => {
+    if (!id || isLoadingOlder || !hasMoreOlder) return;
+    await loadOlderMessages(id);
+  };
 
   const handleMenuPress = () => {
     showAlert(
@@ -136,7 +153,7 @@ export default function ChatConversationScreen() {
   };
 
   const renderItem = useCallback(
-    ({ item }: { item: any }) => {
+    ({ item }: { item: Message }) => {
       const isFirstUnread = item._id === firstUnreadId;
 
       return (
@@ -179,49 +196,57 @@ export default function ChatConversationScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
       >
-        {/* Messages List */}
+        {/* Messages List (inverted renders recent messages at bottom in 0ms without scroll jump) */}
         {isMessagesLoading ? (
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="large" color={theme.primary} />
           </View>
+        ) : reversedMessages.length === 0 ? (
+          <View style={styles.emptyWrapper}>
+            <View style={styles.emptyContainer}>
+              <Text style={[styles.emptyText, { color: theme.baseContentMuted }]}>
+                No messages yet. Send a wave or say hello!
+              </Text>
+            </View>
+            <TypingIndicator visible={isTyping} avatarUri={selectedUser?.profilePic} />
+          </View>
         ) : (
           <FlatList
             ref={flatListRef}
-            data={messages}
-            keyExtractor={(item) => item._id}
+            inverted={true}
+            data={reversedMessages}
+            keyExtractor={(item) => item.localId || item._id}
             renderItem={renderItem}
             initialNumToRender={20}
             maxToRenderPerBatch={15}
             windowSize={11}
             removeClippedSubviews={Platform.OS === 'android'}
+            keyboardShouldPersistTaps="handled"
             contentContainerStyle={styles.listContent}
-            onContentSizeChange={() => {
-              if (messages.length > 0) {
-                flatListRef.current?.scrollToEnd({ animated: false });
-              }
-            }}
-            onLayout={() => {
-              if (messages.length > 0) {
-                flatListRef.current?.scrollToEnd({ animated: false });
-              }
-            }}
-            ListEmptyComponent={
-              <View style={styles.emptyContainer}>
-                <Text style={[styles.emptyText, { color: theme.baseContentMuted }]}>
-                  No messages yet. Send a wave or say hello!
-                </Text>
-              </View>
+            onEndReachedThreshold={0.25}
+            onEndReached={handleLoadOlder}
+            ListHeaderComponent={
+              <TypingIndicator visible={isTyping} avatarUri={selectedUser?.profilePic} />
+            }
+            ListFooterComponent={
+              hasMoreOlder ? (
+                <TouchableOpacity
+                  onPress={handleLoadOlder}
+                  disabled={isLoadingOlder}
+                  style={[styles.loadOlderBtn, { backgroundColor: theme.base200, borderColor: theme.base300 }]}
+                  activeOpacity={0.75}
+                >
+                  {isLoadingOlder ? (
+                    <ActivityIndicator size="small" color={theme.primary} />
+                  ) : (
+                    <Text style={[styles.loadOlderText, { color: theme.primary }]}>
+                      Load older messages
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              ) : undefined
             }
           />
-        )}
-
-        {/* Typing indicator */}
-        {isTyping && (
-          <View style={[styles.typingContainer, { backgroundColor: theme.base200 }]}>
-            <Text style={[styles.typingText, { color: theme.baseContentMuted }]}>
-              {selectedUser?.fullName || 'User'} is typing...
-            </Text>
-          </View>
         )}
 
         {/* Bottom Input Field */}
@@ -243,9 +268,27 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  emptyWrapper: {
+    flex: 1,
+    justifyContent: 'space-between',
+  },
   listContent: {
     paddingVertical: 8,
-    flexGrow: 1,
+  },
+  loadOlderBtn: {
+    alignSelf: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: 1,
+    marginVertical: 10,
+    minHeight: 30,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadOlderText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
   unreadDividerContainer: {
     flexDirection: 'row',
@@ -275,22 +318,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 32,
-    paddingVertical: 100,
   },
   emptyText: {
     fontSize: 14,
     textAlign: 'center',
-  },
-  typingContainer: {
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    marginHorizontal: 16,
-    marginBottom: 6,
-    borderRadius: 12,
-    alignSelf: 'flex-start',
-  },
-  typingText: {
-    fontSize: 12,
-    fontStyle: 'italic',
   },
 });

@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { View, StyleSheet, Platform } from 'react-native';
+
 import { StatusBar } from 'expo-status-bar';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
@@ -11,6 +12,7 @@ import { useThemeStore } from '../store/useThemeStore';
 import { useCallStore } from '../store/useCallStore';
 import { useChatStore } from '../store/useChatStore';
 import { useFriendsStore } from '../store/useFriendsStore';
+import { setupCallNotificationListeners } from '../lib/notifications';
 import { IncomingCallModal } from '../components/call/IncomingCallModal';
 import { ActiveCallView } from '../components/call/ActiveCallView';
 import { ThemedToast } from '../components/ui/ThemedToast';
@@ -19,7 +21,12 @@ import { ThemedAlertModal } from '../components/ui/ThemedAlertModal';
 export default function RootLayout() {
   const { authUser, isCheckingAuth, checkAuth, socket } = useAuthStore();
   const { theme, loadTheme } = useThemeStore();
-  const { initializeSocketListeners, uninitializeSocketListeners } = useCallStore();
+  const {
+    initializeSocketListeners,
+    uninitializeSocketListeners,
+    receivePushCall,
+    rejectCall,
+  } = useCallStore();
   const { subscribeToMessages, unSubscribeFromMessages } = useChatStore();
   const { subscribeToFriendReqests, unSubscribeFromFriendReqests } = useFriendsStore();
   const segments = useSegments();
@@ -31,6 +38,19 @@ export default function RootLayout() {
     checkAuth();
     SplashScreen.hideAsync().catch(() => {});
   }, []);
+
+  // Listen to incoming call push notifications (foreground, background, & cold-start launches)
+  useEffect(() => {
+    if (!authUser) return;
+    return setupCallNotificationListeners({
+      onIncomingCallAction: (data, autoAccept) => {
+        receivePushCall(data, autoAccept);
+      },
+      onDeclineCallAction: (callerId) => {
+        rejectCall(callerId);
+      },
+    });
+  }, [authUser?._id]);
 
   // Synchronize native Android window background with DaisyUI theme
   useEffect(() => {

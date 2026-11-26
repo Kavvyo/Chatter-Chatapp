@@ -5,9 +5,9 @@ import {
   TouchableOpacity,
   StyleSheet,
   Image,
-  ActivityIndicator,
   Keyboard,
   Platform,
+  Animated,
 } from 'react-native';
 import { Image as ImageIcon, Send, X } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -25,6 +25,7 @@ export const MessageInput: React.FC = () => {
   const { socket } = useAuthStore();
   const { theme } = useThemeStore();
   const typingTimeoutRef = useRef<any>(null);
+  const sendScale = useRef(new Animated.Value(1)).current;
 
   // Monitor keyboard visibility to dynamically adjust bottom elevation
   useEffect(() => {
@@ -85,6 +86,16 @@ export const MessageInput: React.FC = () => {
     const messagePayload: { text?: string; image?: string } = {};
     if (text.trim()) messagePayload.text = text.trim();
     if (imagePreview) messagePayload.image = imagePreview;
+
+    // Tactile spring pulse on Send tap
+    sendScale.setValue(0.82);
+    Animated.spring(sendScale, {
+      toValue: 1,
+      damping: 12,
+      stiffness: 280,
+      mass: 0.6,
+      useNativeDriver: true,
+    }).start();
 
     // Instant reset for immediate 0ms UI feedback
     setText('');
@@ -148,19 +159,21 @@ export const MessageInput: React.FC = () => {
           maxLength={1000}
         />
 
-        <TouchableOpacity
-          onPress={handleSend}
-          disabled={!text.trim() && !imagePreview}
-          style={[
-            styles.sendBtn,
-            {
-              backgroundColor: text.trim() || imagePreview ? theme.primary : theme.base300,
-            },
-          ]}
-          activeOpacity={0.8}
-        >
-          <Send size={18} color="#ffffff" />
-        </TouchableOpacity>
+        <Animated.View style={{ transform: [{ scale: sendScale }] }}>
+          <TouchableOpacity
+            onPress={handleSend}
+            disabled={!text.trim() && !imagePreview}
+            style={[
+              styles.sendBtn,
+              {
+                backgroundColor: text.trim() || imagePreview ? theme.primary : theme.base300,
+              },
+            ]}
+            activeOpacity={0.8}
+          >
+            <Send size={18} color="#ffffff" />
+          </TouchableOpacity>
+        </Animated.View>
       </View>
     </View>
   );

@@ -1,7 +1,14 @@
 import { create } from 'zustand';
 import { io, Socket } from 'socket.io-client';
-import { axiosInstance, clearAuthCookie } from '../lib/axios';
+import { axiosInstance, clearAuthCookie, hasStoredAuthCookie } from '../lib/axios';
 import { BASE_URL } from '../lib/config';
+import { clearSyncedPushToken, registerAndSyncPushToken } from '../lib/notifications';
+import {
+  clearCachedAuthUser,
+  clearUserDataCaches,
+  getCachedAuthUser,
+  setCachedAuthUser,
+} from '../lib/cache';
 
 export interface AuthUser {
   _id: string;
@@ -35,6 +42,18 @@ interface AuthState {
   disConnectSocket: () => void;
 }
 
+function hydrateDataStores(userId: string) {
+  try {
+    // Lazy imports avoid circular store dependencies at module evaluation
+    const { useFriendsStore } = require('./useFriendsStore');
+    const { useChatStore } = require('./useChatStore');
+    useFriendsStore.getState().hydrateFromCache(userId);
+    useChatStore.getState().hydrateFromCache(userId);
+  } catch {
+    // ignore
+  }
+}
+
 export const useAuthStore = create<AuthState>((set, get) => ({
   authUser: null,
   isSigningUp: false,
@@ -46,14 +65,49 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   socket: null,
 
   checkAuth: async () => {
+    let hydratedFromCache = false;
+
+    try {
+      const [hasCookie, cachedUser] = await Promise.all([
+        hasStoredAuthCookie(),
+        getCachedAuthUser<AuthUser>(),
+      ]);
+
+      if (hasCookie && cachedUser?._id) {
+        hydratedFromCache = true;
+        set({ authUser: cachedUser, isCheckingAuth: false });
+        hydrateDataStores(cachedUser._id);
+        get().connectSocket();
+      }
+    } catch {
+      // Fall through cleanly to network check
+    }
+
     try {
       const res = await axiosInstance.get('/auth/check');
-      set({ authUser: res.data });
+      const freshUser = res.data as AuthUser;
+      set({ authUser: freshUser, isCheckingAuth: false });
+      await setCachedAuthUser(freshUser);
+
+      if (!hydratedFromCache && freshUser?._id) {
+        hydrateDataStores(freshUser._id);
+      }
+
       get().connectSocket();
-    } catch (error) {
-      set({ authUser: null });
-    } finally {
-      set({ isCheckingAuth: false });
+      registerAndSyncPushToken().catch(() => {});
+    } catch (error: any) {
+      const status = error?.response?.status;
+      if (status === 401 || status === 403 || !hydratedFromCache) {
+        if (status === 401 || status === 403) {
+          await clearAuthCookie();
+          await clearCachedAuthUser();
+          get().disConnectSocket();
+        }
+        set({ authUser: null, isCheckingAuth: false });
+      } else {
+        // Offline / transient network timeout: preserve cached user so offline history remains viewable
+        set({ isCheckingAuth: false });
+      }
     }
   },
 
@@ -88,18 +142,25 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logOut: async () => {
+    const userId = get().authUser?._id;
     try {
+      await clearSyncedPushToken();
       await axiosInstance.post('/auth/logout');
     } catch (error) {
       // Continue cleanup anyway
     } finally {
       await clearAuthCookie();
+      await clearCachedAuthUser();
+      if (userId) {
+        await clearUserDataCaches(userId);
+      }
       get().disConnectSocket();
-      set({ authUser: null });
+      set({ authUser: null, onlineUsers: [] });
       try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
         const { useChatStore } = require('./useChatStore');
-        useChatStore.getState().setSelectedUser(null);
+        const { useFriendsStore } = require('./useFriendsStore');
+        useChatStore.getState().reset();
+        useFriendsStore.getState().reset();
       } catch {
         // ignore
       }
@@ -111,6 +172,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const res = await axiosInstance.put('/auth/update-profile', data);
       set({ authUser: res.data.updatedUser });
+      await setCachedAuthUser(res.data.updatedUser);
       return { success: true };
     } catch (error: any) {
       const message = error.response?.data?.message || 'Profile update failed';
@@ -124,6 +186,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const res = await axiosInstance.put('/auth/update-fullname', data);
       set({ authUser: res.data.updatedUser });
+      await setCachedAuthUser(res.data.updatedUser);
       return { success: true };
     } catch (error: any) {
       const message = error.response?.data?.message || 'Name update failed';
@@ -160,6 +223,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const { authUser } = get();
     if (!authUser || get().socket?.connected) return;
 
+    const existing = get().socket;
+    if (existing) {
+      if (!existing.connected) existing.connect();
+      return;
+    }
+
     const socket = io(BASE_URL, {
       query: {
         userId: authUser._id,
@@ -172,10 +241,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     socket.on('getOnlineUsers', (userIds: string[]) => {
       set({ onlineUsers: userIds });
     });
+
+    socket.on('connect', () => {
+      try {
+        const { useCallStore } = require('./useCallStore');
+        const pendingDecline = useCallStore.getState().pendingDeclineCallerId;
+        if (pendingDecline) {
+          socket.emit('rejectCall', { to: pendingDecline });
+          useCallStore.setState({ pendingDeclineCallerId: null });
+        }
+      } catch {
+        // ignore
+      }
+    });
   },
 
   disConnectSocket: () => {
-    if (get().socket?.connected) {
+    if (get().socket) {
       get().socket?.disconnect();
     }
     set({ socket: null });

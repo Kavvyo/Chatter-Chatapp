@@ -35,24 +35,21 @@ function MessageInput() {
     if(fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  const handleSendMessage = async (e) => {
+  const handleSendMessage = (e) => {
     e.preventDefault();
-    if (!text.trim() && !imagePreview) return;
+    const trimmedText = text.trim();
+    const currentImage = imagePreview;
+    if (!trimmedText && !currentImage) return;
 
-    try {
-      await sendMessage({
-        text: text.trim(),
-        image: imagePreview,
-      });
+    setText("");
+    setImagePreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    socket?.emit("stopTyping", { to: selectedUser._id });
 
-      setText("");
-      setImagePreview(null);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-
-      socket?.emit("stopTyping", { to: selectedUser._id }); // optional: stop typing when sent
-    } catch (error) {
-      toast.error("Failed to send message", error);
-    }
+    sendMessage({
+      text: trimmedText,
+      image: currentImage,
+    });
   };
 
   const emitTyping = debounce(() => {

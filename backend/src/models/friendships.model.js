@@ -21,6 +21,10 @@ const friendshipSchema = new mongoose.Schema(
     { timestamps: true }
 );
 
+friendshipSchema.index({ requester: 1, recipient: 1, status: 1 });
+friendshipSchema.index({ recipient: 1, requester: 1, status: 1 });
+friendshipSchema.index({ recipient: 1, status: 1 });
+
 const Friendship = mongoose.model("friendship", friendshipSchema);
 
 export default Friendship;

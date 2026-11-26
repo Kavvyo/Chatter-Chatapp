@@ -8,11 +8,30 @@
     "scheme": "chatter",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/expo.icon",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Chatter uses your camera for real-time video calls.",
+        "NSMicrophoneUsageDescription": "Chatter uses your microphone for voice and video calls.",
+        "UIBackgroundModes": ["audio"]
+      }
     },
     "android": {
+      "package": "com.kavindu.chatter",
       "usesCleartextTraffic": true,
       "softwareKeyboardLayoutMode": "resize",
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO",
+        "VIBRATE",
+        "INTERNET",
+        "MODIFY_AUDIO_SETTINGS",
+        "ACCESS_NETWORK_STATE",
+        "WAKE_LOCK",
+        "BLUETOOTH",
+        "BLUETOOTH_CONNECT",
+        "POST_NOTIFICATIONS",
+        "USE_FULL_SCREEN_INTENT"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#1d232a",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -32,11 +51,34 @@
         {
           "enforceContrast": false
         }
-      ]
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "extraProguardRules": "-dontwarn **"
+          }
+        }
+      ],
+      "expo-notifications",
+      "./plugins/withCallSupport"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "expo-navigation-bar": {
+        "enforceContrast": false
+      },
+      "eas": {
+        "projectId": "cfd1c5ef-a9d1-4274-b742-7bea41fcc694"
+      }
     }
   }
 }

@@ -187,4 +187,26 @@ export const updateFullname = async(req, res) => {
         res.status(500).json({message: 'Internal Server Error'})
     }
 };
+
+export const savePushToken = async (req, res) => {
+    try {
+        const { expoPushToken } = req.body;
+        const userId = req.user._id;
+        const cleanToken = typeof expoPushToken === "string" ? expoPushToken.trim() : "";
+
+        if (
+            cleanToken &&
+            !cleanToken.startsWith("ExponentPushToken[") &&
+            !cleanToken.startsWith("ExpoPushToken[")
+        ) {
+            return res.status(400).json({ message: "Invalid Expo push token format" });
+        }
+
+        await User.findByIdAndUpdate(userId, { expoPushToken: cleanToken });
+        res.status(200).json({ ok: true });
+    } catch (error) {
+        console.log("Error in savePushToken", error.message);
+        res.status(500).json({ message: "Internal Server Error" });
+    }
+};
   
