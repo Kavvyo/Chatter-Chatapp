@@ -33,7 +33,26 @@ export function buildMessagePayload({ senderId, receiverId, text, imageUrl }) {
   return { doc, wire };
 }
 
+export function cancelPendingForConversation(userA, userB) {
+  const a = userA.toString();
+  const b = userB.toString();
+  const cancelledIds = [];
+
+  for (const [key, doc] of pendingDocs.entries()) {
+    const s = doc.senderId?.toString();
+    const r = doc.receiverId?.toString();
+    if ((s === a && r === b) || (s === b && r === a)) {
+      doc._cancelled = true;
+      cancelledIds.push(doc._id);
+      pendingDocs.delete(key);
+    }
+  }
+
+  return cancelledIds;
+}
+
 export function persistMessageInBackground(doc) {
+  if (doc._cancelled) return;
   const docKey = doc._id.toString();
   pendingDocs.set(docKey, doc);
 
@@ -44,6 +63,10 @@ export function persistMessageInBackground(doc) {
     .catch((err) => {
       console.warn("Background message persist failed, retrying:", err?.message || err);
       setTimeout(() => {
+        if (doc._cancelled) {
+          pendingDocs.delete(docKey);
+          return;
+        }
         Message.create(doc)
           .catch((retryErr) => {
             console.error("Background message persist retry failed:", retryErr?.message || retryErr);

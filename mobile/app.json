@@ -8,7 +8,6 @@
     "scheme": "chatter",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon",
       "infoPlist": {
         "NSCameraUsageDescription": "Chatter uses your camera for real-time video calls.",
         "NSMicrophoneUsageDescription": "Chatter uses your microphone for voice and video calls.",
@@ -33,7 +32,7 @@
         "USE_FULL_SCREEN_INTENT"
       ],
       "adaptiveIcon": {
-        "backgroundColor": "#1d232a",
+        "backgroundColor": "#000000",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
@@ -56,6 +55,14 @@
         "expo-build-properties",
         {
           "android": {
+            "buildArchs": ["arm64-v8a", "armeabi-v7a"],
+            "enableMinifyInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true,
+            "useLegacyPackaging": true,
+            "enableBundleCompression": true,
+            "gifEnabled": false,
+            "webpEnabled": false,
+            "networkInspector": false,
             "extraProguardRules": "-dontwarn **"
           }
         }

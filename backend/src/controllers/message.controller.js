@@ -9,7 +9,9 @@ import {
     buildMessagePayload,
     persistMessageInBackground,
     markConversationReadFast,
+    cancelPendingForConversation,
 } from "../lib/messageService.js";
+import ConversationClear, { getConversationPairKey } from "../models/conversationClear.model.js";
 
 export const getUserForSidebar = async (req, res) => {
     try {
@@ -39,6 +41,26 @@ export const getMessages = async (req, res) => {
         if (typeof after === "string" && after.trim()) {
             const afterDate = new Date(after);
             if (!Number.isNaN(afterDate.getTime())) {
+                if (req.query.syncMeta === "1") {
+                    const pairKey = getConversationPairKey(myId, userToChatId);
+                    const [deltaMessages, clearDoc, serverCount] = await Promise.all([
+                        Message.find({
+                            ...baseFilter,
+                            createdAt: { $gt: afterDate },
+                        }).sort({ createdAt: 1 }),
+                        ConversationClear.findOne({ participantsKey: pairKey })
+                            .select("clearedAt")
+                            .lean(),
+                        Message.countDocuments(baseFilter),
+                    ]);
+
+                    return res.status(200).json({
+                        messages: deltaMessages,
+                        clearedAt: clearDoc?.clearedAt ? clearDoc.clearedAt.toISOString() : null,
+                        serverCount,
+                    });
+                }
+
                 const deltaMessages = await Message.find({
                     ...baseFilter,
                     createdAt: { $gt: afterDate },
@@ -58,6 +80,21 @@ export const getMessages = async (req, res) => {
                 if (!Number.isNaN(beforeDate.getTime())) {
                     queryFilter.createdAt = { $lt: beforeDate };
                 }
+            }
+
+            if (req.query.syncMeta === "1" && !before) {
+                const pairKey = getConversationPairKey(myId, userToChatId);
+                const [recentDesc, clearDoc] = await Promise.all([
+                    Message.find(queryFilter).sort({ createdAt: -1 }).limit(safeLimit),
+                    ConversationClear.findOne({ participantsKey: pairKey })
+                        .select("clearedAt")
+                        .lean(),
+                ]);
+
+                return res.status(200).json({
+                    messages: recentDesc.reverse(),
+                    clearedAt: clearDoc?.clearedAt ? clearDoc.clearedAt.toISOString() : null,
+                });
             }
 
             const recentDesc = await Message.find(queryFilter)
@@ -114,19 +151,56 @@ export const deleteAllMessages = async (req, res) => {
     try {
         const {id: receiverId} = req.params;
         const myId = req.user._id;
+        const clearedAt = new Date();
+        const clearedAtIso = clearedAt.toISOString();
+        const pairKey = getConversationPairKey(myId, receiverId);
 
-        const deleted = await Message.deleteMany({
-            $or:[
-                {senderId: myId, receiverId: receiverId},
-                {senderId: receiverId, receiverId: myId}
-            ]
-        });
+        const inFlightIds = cancelPendingForConversation(myId, receiverId);
+
+        const [deleted] = await Promise.all([
+            Message.deleteMany({
+                $or:[
+                    {senderId: myId, receiverId: receiverId},
+                    {senderId: receiverId, receiverId: myId}
+                ]
+            }),
+            ConversationClear.findOneAndUpdate(
+                { participantsKey: pairKey },
+                {
+                    $set: {
+                        participants: [myId, receiverId],
+                        clearedAt,
+                        clearedBy: myId,
+                    },
+                },
+                { upsert: true, new: true }
+            ),
+        ]);
 
         if (!deleted) {
             return res.status(404).json({ message: "Masseges alredy deleted" });
         }
 
-        res.status(200).json({ message: "conversation Deleted" });
+        // Sweep any in-flight write-behind creates that had already reached MongoDB
+        if (inFlightIds.length > 0) {
+            setTimeout(() => {
+                Message.deleteMany({ _id: { $in: inFlightIds } }).catch(() => {});
+            }, 500);
+        }
+
+        // Immediately sync clear across both users' connected mobile and web clients
+        io.to(receiverId.toString()).emit("conversationCleared", {
+            peerId: myId.toString(),
+            clearedBy: myId.toString(),
+            clearedAt: clearedAtIso,
+        });
+        io.to(myId.toString()).emit("conversationCleared", {
+            peerId: receiverId.toString(),
+            clearedBy: myId.toString(),
+            clearedAt: clearedAtIso,
+        });
+
+        res.status(200).json({ message: "conversation Deleted", clearedAt: clearedAtIso });
     } catch (error) {
         console.log("Error conversation deletation:", error.message);
         res.status(500).json({ message: "Internal Server Error" });
@@ -138,6 +212,29 @@ export const unreadCounts = async (req, res) => {
     const userId = new mongoose.Types.ObjectId(req.user.id);
 
     try {
+        if (req.query.includeClears === "1") {
+            const myIdStr = req.user.id.toString();
+            const [counts, clearDocs] = await Promise.all([
+                Message.aggregate([
+                    { $match: { receiverId: userId, read: false } },
+                    { $group: { _id: "$senderId", count: { $sum: 1 } } }
+                ]),
+                ConversationClear.find({ participants: userId })
+                    .select("participants clearedAt")
+                    .lean(),
+            ]);
+
+            const clears = {};
+            for (const doc of clearDocs) {
+                const peer = doc.participants.find((p) => p.toString() !== myIdStr);
+                if (peer && doc.clearedAt) {
+                    clears[peer.toString()] = doc.clearedAt.toISOString();
+                }
+            }
+
+            return res.json({ counts, clears });
+        }
+
         const unreadCounts = await Message.aggregate([
 
             { $match: { receiverId: userId, read: false } },

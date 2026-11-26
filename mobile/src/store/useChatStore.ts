@@ -33,6 +33,69 @@ export interface ChatUser {
 
 const INITIAL_PAGE_LIMIT = 50;
 
+function pruneMessagesBefore(list: Message[], clearedAtIso?: string | null): Message[] {
+  if (list.length === 0) return list;
+  if (!clearedAtIso) {
+    return list.filter((m) => m._id.startsWith('temp_'));
+  }
+
+  const cutoffMs = new Date(clearedAtIso).getTime();
+  if (Number.isNaN(cutoffMs)) return list;
+
+  return list.filter((m) => {
+    if (m._id.startsWith('temp_')) return true;
+    return new Date(m.createdAt).getTime() > cutoffMs;
+  });
+}
+
+async function applyConversationClear(
+  peerId: string,
+  clearedAtIso: string | undefined,
+  get: () => ChatState,
+  set: (fn: (state: ChatState) => Partial<ChatState>) => void,
+  clearUnread = false
+) {
+  const myId = useAuthStore.getState().authUser?._id;
+  let existing = get().messagesByUser[peerId];
+  if ((!existing || existing.length === 0) && myId) {
+    existing = (await getCachedMessages<Message>(myId, peerId)) || [];
+  }
+
+  const base = existing || [];
+  const pruned = pruneMessagesBefore(base, clearedAtIso);
+  const listChanged = pruned.length !== base.length;
+  const shouldClearUnread = clearUnread && (get().unreadCounts[peerId] || 0) > 0;
+  if (!listChanged && !shouldClearUnread) return;
+
+  if (listChanged && myId) {
+    await setCachedMessages(myId, peerId, pruned);
+  }
+
+  set((state) => {
+    const nextUnread =
+      clearUnread && (state.unreadCounts[peerId] || 0) > 0
+        ? { ...state.unreadCounts, [peerId]: 0 }
+        : state.unreadCounts;
+    if (nextUnread !== state.unreadCounts && myId) {
+      setCachedUnreadCounts(myId, nextUnread);
+    }
+
+    return {
+      unreadCounts: nextUnread,
+      ...(listChanged
+        ? {
+            messagesByUser: { ...state.messagesByUser, [peerId]: pruned },
+            messages: state.selectedUser?._id?.toString() === peerId ? pruned : state.messages,
+            hasMoreOlderByUser: {
+              ...state.hasMoreOlderByUser,
+              [peerId]: pruned.length >= INITIAL_PAGE_LIMIT,
+            },
+          }
+        : {}),
+    };
+  });
+}
+
 function mergeMessagesById(existing: Message[], incoming: Message[]): Message[] {
   if (incoming.length === 0) return existing;
 
@@ -197,26 +260,65 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     try {
       if (hasCachedData && cached) {
-        // 2a. Incremental delta sync (fetch only messages after cached cursor)
+        // 2a. Incremental delta sync + deletion reconciliation (clearedAt & serverCount)
         const cursor = getDeltaCursor(cached, myId);
         const res = await axiosInstance.get(`/messages/${peerId}`, {
-          params: cursor ? { after: cursor } : { limit: INITIAL_PAGE_LIMIT },
+          params: {
+            ...(cursor ? { after: cursor } : { limit: INITIAL_PAGE_LIMIT }),
+            syncMeta: '1',
+          },
         });
-        const delta = (res.data || []) as Message[];
+        const payload = res.data as
+          | Message[]
+          | { messages: Message[]; clearedAt?: string | null; serverCount?: number };
+        const delta = Array.isArray(payload) ? payload : payload.messages || [];
+        const clearedAt = Array.isArray(payload) ? null : payload.clearedAt || null;
+        const serverCount = Array.isArray(payload) ? undefined : payload.serverCount;
 
-        if (delta.length > 0) {
-          const latestList = get().messagesByUser[peerId] || cached;
-          const merged = mergeMessagesById(latestList, delta);
+        const latestList = get().messagesByUser[peerId] || cached;
+        let prunedBase = latestList;
+        if (serverCount === 0) {
+          prunedBase = pruneMessagesBefore(latestList, null);
+        } else if (clearedAt) {
+          prunedBase = pruneMessagesBefore(latestList, clearedAt);
+        }
 
-          set((state) => ({
-            messagesByUser: { ...state.messagesByUser, [peerId]: merged },
-            messages: state.selectedUser?._id === peerId ? merged : state.messages,
-          }));
+        const wasPruned = prunedBase.length !== latestList.length;
+
+        if (wasPruned || delta.length > 0) {
+          const merged = mergeMessagesById(prunedBase, delta);
+
+          set((state) => {
+            const nextUnread =
+              serverCount === 0 && (state.unreadCounts[peerId] || 0) > 0
+                ? { ...state.unreadCounts, [peerId]: 0 }
+                : state.unreadCounts;
+            if (nextUnread !== state.unreadCounts && myId) {
+              setCachedUnreadCounts(myId, nextUnread);
+            }
+
+            return {
+              messagesByUser: { ...state.messagesByUser, [peerId]: merged },
+              messages: state.selectedUser?._id === peerId ? merged : state.messages,
+              hasMoreOlderByUser: {
+                ...state.hasMoreOlderByUser,
+                [peerId]:
+                  serverCount === 0
+                    ? false
+                    : wasPruned
+                    ? merged.length >= INITIAL_PAGE_LIMIT
+                    : state.hasMoreOlderByUser[peerId],
+              },
+              unreadCounts: nextUnread,
+            };
+          });
 
           if (myId) setCachedMessages(myId, peerId, merged);
-          prefetchImageUrls(delta.map((m) => m.image));
+          if (delta.length > 0) {
+            prefetchImageUrls(delta.map((m) => m.image));
+          }
 
-          if (get().selectedUser?._id === peerId) {
+          if (get().selectedUser?._id === peerId && delta.length > 0) {
             const unreadIncoming = delta
               .filter((m) => m.senderId === peerId && !m.read)
               .map((m) => m._id);
@@ -228,9 +330,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } else {
         // 2b. Initial sync (fetch newest page of 50 messages)
         const res = await axiosInstance.get(`/messages/${peerId}`, {
-          params: { limit: INITIAL_PAGE_LIMIT },
+          params: { limit: INITIAL_PAGE_LIMIT, syncMeta: '1' },
         });
-        const fetched = (res.data || []) as Message[];
+        const payload = res.data as
+          | Message[]
+          | { messages: Message[]; clearedAt?: string | null };
+        const fetched = Array.isArray(payload) ? payload : payload.messages || [];
 
         set((state) => ({
           messagesByUser: { ...state.messagesByUser, [peerId]: fetched },
@@ -416,6 +521,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     socket.off('newMessage');
     socket.off('messageRead');
+    socket.off('conversationCleared');
     socket.off('typing');
     socket.off('stopTyping');
 
@@ -553,6 +659,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({ isTyping: false });
       }
     });
+
+    socket.on(
+      'conversationCleared',
+      async ({ peerId, clearedAt }: { peerId: string; clearedAt?: string }) => {
+        if (!peerId) return;
+        await applyConversationClear(peerId.toString(), clearedAt, get, set, true);
+      }
+    );
   },
 
   unSubscribeFromMessages: () => {
@@ -560,6 +674,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!socket) return;
     socket.off('newMessage');
     socket.off('messageRead');
+    socket.off('conversationCleared');
     socket.off('typing');
     socket.off('stopTyping');
   },
@@ -571,11 +686,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   deleteAllMessages: async (userId: string) => {
     const myId = useAuthStore.getState().authUser?._id;
-    set((state) => ({
-      messages: state.selectedUser?._id === userId ? [] : state.messages,
-      messagesByUser: { ...state.messagesByUser, [userId]: [] },
-      hasMoreOlderByUser: { ...state.hasMoreOlderByUser, [userId]: false },
-    }));
+    set((state) => {
+      const nextUnread = { ...state.unreadCounts, [userId]: 0 };
+      if (myId) setCachedUnreadCounts(myId, nextUnread);
+      return {
+        messages: state.selectedUser?._id === userId ? [] : state.messages,
+        messagesByUser: { ...state.messagesByUser, [userId]: [] },
+        hasMoreOlderByUser: { ...state.hasMoreOlderByUser, [userId]: false },
+        unreadCounts: nextUnread,
+      };
+    });
     if (myId) setCachedMessages(myId, userId, []);
 
     try {
@@ -588,13 +708,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
   fetchUnreadCounts: async () => {
     const myId = useAuthStore.getState().authUser?._id;
     try {
-      const res = await axiosInstance.get('/messages/unreadcounts');
+      const res = await axiosInstance.get('/messages/unreadcounts', {
+        params: { includeClears: '1' },
+      });
+      const payload = res.data as
+        | Array<{ _id: string; count: number }>
+        | { counts: Array<{ _id: string; count: number }>; clears?: Record<string, string> };
+
+      const countsList = Array.isArray(payload) ? payload : payload.counts || [];
+      const clears = Array.isArray(payload) ? {} : payload.clears || {};
+
       const countMap: Record<string, number> = {};
-      res.data.forEach((item: { _id: string; count: number }) => {
+      countsList.forEach((item) => {
         countMap[item._id] = item.count;
       });
       set({ unreadCounts: countMap });
       if (myId) setCachedUnreadCounts(myId, countMap);
+
+      if (clears) {
+        for (const [peerId, clearedAt] of Object.entries(clears)) {
+          if (clearedAt) {
+            await applyConversationClear(peerId, clearedAt, get, set);
+          }
+        }
+      }
     } catch {
       // Keep cached unread counts if offline
     }

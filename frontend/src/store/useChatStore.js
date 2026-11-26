@@ -128,6 +128,7 @@ export const useChatStore = create((set, get) => ({
 
         socket.off("newMessage");
         socket.off("messageRead");
+        socket.off("conversationCleared");
     
         socket.on("newMessage", (newMessage) => {
             const { authUser } = useAuthStore.getState();
@@ -187,6 +188,34 @@ export const useChatStore = create((set, get) => ({
             }
         });
 
+        socket.on("conversationCleared", ({ peerId, clearedAt }) => {
+            if (!peerId) return;
+            const pId = peerId.toString();
+            const cutoffMs = clearedAt ? new Date(clearedAt).getTime() : NaN;
+
+            set((state) => {
+                const nextUnread = { ...state.unreadCounts };
+                delete nextUnread[pId];
+
+                if (state.selectedUser?._id?.toString() !== pId) {
+                    return { unreadCounts: nextUnread };
+                }
+
+                const remaining = Number.isNaN(cutoffMs)
+                    ? state.messages.filter((m) => m._id?.toString().startsWith("temp_"))
+                    : state.messages.filter(
+                          (m) =>
+                              m._id?.toString().startsWith("temp_") ||
+                              new Date(m.createdAt).getTime() > cutoffMs
+                      );
+
+                return {
+                    unreadCounts: nextUnread,
+                    messages: remaining,
+                };
+            });
+        });
+
 
     },
     
@@ -195,6 +224,7 @@ export const useChatStore = create((set, get) => ({
         if (!socket) return;
         socket.off("newMessage");
         socket.off("messageRead");
+        socket.off("conversationCleared");
 
     },
 
@@ -213,11 +243,19 @@ export const useChatStore = create((set, get) => ({
     },
     
     deleteAllMessages: async (userId) => {
+        set((state) => {
+            const nextUnread = { ...state.unreadCounts };
+            delete nextUnread[userId];
+            return {
+                unreadCounts: nextUnread,
+                messages: state.selectedUser?._id === userId ? [] : state.messages,
+            };
+        });
         try {
             await axiosInstanace.delete(`/messages/deleteAll/${userId}`);
-            get().getMessages(userId);
             toast.success("Conversation deleted");
         } catch (error) {
+            get().getMessages(userId);
             toast.error(error.response?.data?.message || "Faild to delete messages");
         }
 
