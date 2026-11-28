@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import {
+  AudioPresets,
   Room,
   RoomEvent,
   Track,
@@ -16,23 +17,38 @@ import {
   stopCallSounds,
 } from "../lib/callSounds";
 
-// Tuned for ultra-low-latency 1-on-1 voice & video calling
+// Tuned for low-latency 1-on-1 calling across both Wi-Fi and mobile cellular links
 function createOptimizedRoom() {
   return new Room({
-    adaptiveStream: false, // Skip ResizeObserver 180p->HD ramp-up delay
-    dynacast: false, // Stream video immediately for 1-on-1 calls
+    adaptiveStream: true, // Dynamically match receiver viewport & bandwidth
+    dynacast: true, // Stop sending unused simulcast layers on mobile congestion
+    audioCaptureDefaults: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      channelCount: 1,
+    },
     videoCaptureDefaults: {
-      resolution: VideoPresets.h540.resolution,
+      resolution: VideoPresets.h360.resolution,
       facingMode: "user",
+      frameRate: 24,
     },
     publishDefaults: {
-      simulcast: false, // Single stream = 3x lower CPU & encoding latency on 1-on-1
-      dtx: true, // Discord-style silence suppression (Discontinuous Transmission)
-      red: true, // Redundant audio packet recovery for lossy mobile networks
-      videoCodec: "vp8",
+      simulcast: true, // Lightweight 180p layer protects smoothness on cellular
+      videoSimulcastLayers: [VideoPresets.h180],
+      dtx: true,
+      red: true,
+      audioPreset: {
+        maxBitrate: AudioPresets.speech.maxBitrate,
+        priority: "high",
+      },
+      videoCodec: "h264",
+      backupCodec: true,
+      degradationPreference: "maintain-framerate",
       videoEncoding: {
-        maxBitrate: 900_000,
-        maxFramerate: 30,
+        maxBitrate: 450_000,
+        maxFramerate: 24,
+        priority: "low",
       },
     },
   });
@@ -234,7 +250,20 @@ export const useCallStore = create((set, get) => ({
     // Task A: Start local microphone IMMEDIATELY (hardware webcam won't block voice audio)
     const audioCapturePromise = (async () => {
       try {
-        const audioTracks = await createLocalTracks({ audio: true, video: false });
+        let audioTracks;
+        try {
+          audioTracks = await createLocalTracks({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              channelCount: 1,
+            },
+            video: false,
+          });
+        } catch {
+          audioTracks = await createLocalTracks({ audio: true, video: false });
+        }
         const micTrack = audioTracks.find((t) => t.kind === Track.Kind.Audio) || null;
         if (!get().callActive || get().roomName !== roomName) {
           audioTracks.forEach((t) => t.stop());
@@ -265,7 +294,8 @@ export const useCallStore = create((set, get) => ({
           audio: false,
           video: {
             facingMode: "user",
-            resolution: VideoPresets.h540.resolution,
+            resolution: VideoPresets.h360.resolution,
+            frameRate: 24,
           },
         });
         const camTrack = videoTracks.find((t) => t.kind === Track.Kind.Video) || null;
@@ -463,7 +493,13 @@ export const useCallStore = create((set, get) => ({
       });
 
       room.startAudio().catch(() => {});
-      await room.connect(url, token);
+      await room.connect(url, token, {
+        autoSubscribe: true,
+        subscriberAllowPause: true,
+        rtcConfig: {
+          iceCandidatePoolSize: 4,
+        },
+      });
 
       if (!get().callActive || get().roomName !== roomName) {
         room.removeAllListeners();
@@ -503,6 +539,12 @@ export const useCallStore = create((set, get) => ({
         .publishTrack(micTrack, {
           source: Track.Source.Microphone,
           simulcast: false,
+          dtx: true,
+          red: true,
+          audioPreset: {
+            maxBitrate: AudioPresets.speech.maxBitrate,
+            priority: "high",
+          },
         })
         .catch(() => {});
     }
@@ -519,7 +561,14 @@ export const useCallStore = create((set, get) => ({
       await room.localParticipant
         .publishTrack(camTrack, {
           source: Track.Source.Camera,
-          simulcast: false,
+          simulcast: true,
+          videoSimulcastLayers: [VideoPresets.h180],
+          degradationPreference: "maintain-framerate",
+          videoEncoding: {
+            maxBitrate: 450_000,
+            maxFramerate: 24,
+            priority: "low",
+          },
         })
         .catch(() => {});
       set((s) => ({
@@ -792,7 +841,8 @@ export const useCallStore = create((set, get) => ({
     try {
       await localVideoTrack.restartTrack({
         facingMode: newFacingMode,
-        resolution: VideoPresets.h540.resolution,
+        resolution: VideoPresets.h360.resolution,
+        frameRate: 24,
       });
       set({ facingMode: newFacingMode });
     } catch (err) {

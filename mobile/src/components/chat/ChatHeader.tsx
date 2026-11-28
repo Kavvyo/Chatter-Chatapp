@@ -12,14 +12,29 @@ interface ChatHeaderProps {
   onMenuPress?: () => void;
 }
 
+function formatLastSeen(iso?: string | null): string {
+  if (!iso) return 'Offline';
+  const ts = new Date(iso).getTime();
+  if (Number.isNaN(ts)) return 'Offline';
+  const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (diffSec < 60) return 'Last seen just now';
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `Last seen ${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `Last seen ${diffHr}h ago`;
+  return `Last seen ${new Date(ts).toLocaleDateString()}`;
+}
+
 export const ChatHeader: React.FC<ChatHeaderProps> = ({ onMenuPress }) => {
   const router = useRouter();
   const { selectedUser, isTyping } = useChatStore();
-  const { onlineUsers } = useAuthStore();
+  const { onlineUsers, lastSeenMap, isSocketConnected } = useAuthStore();
   const { callUser } = useCallStore();
   const { theme } = useThemeStore();
 
   const isOnline = Boolean(selectedUser && onlineUsers.includes(selectedUser._id));
+  const lastSeenIso = selectedUser ? lastSeenMap[selectedUser._id] || selectedUser.lastSeen : null;
+  const offlineLabel = !isSocketConnected ? 'Connecting...' : formatLastSeen(lastSeenIso);
   const surfaceBtnBg = theme.isDark ? 'rgba(255,255,255,0.07)' : theme.base200;
   const dividerColor = theme.isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)';
 
@@ -65,7 +80,7 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({ onMenuPress }) => {
               : selectedUser
               ? isOnline
                 ? 'Active now'
-                : 'Offline'
+                : offlineLabel
               : 'Connecting...'}
           </Text>
         </View>

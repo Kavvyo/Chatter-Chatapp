@@ -640,24 +640,43 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
       }
 
       function createOptimizedRoom(LK, facing) {
-        return new LK.Room({
-          adaptiveStream: false,
-          dynacast: false,
-          videoCaptureDefaults: {
-            resolution: LK.VideoPresets.h540.resolution,
-            facingMode: facing || 'user',
-          },
-          publishDefaults: {
-            simulcast: false,
-            dtx: true,
-            red: true,
-            videoCodec: 'vp8',
+          var speechPreset = LK.AudioPresets && LK.AudioPresets.speech
+            ? { maxBitrate: LK.AudioPresets.speech.maxBitrate, priority: 'high' }
+            : { maxBitrate: 24000, priority: 'high' };
+          var publishDefaults = {
+            simulcast: true, // Publish 360p + lightweight 180p fallback layer for mobile data
+            dtx: true, // Silence suppression reduces uplink bursts
+            red: true, // Redundant audio packet recovery for lossy cellular networks
+            audioPreset: speechPreset,
+            videoCodec: 'h264', // Hardware MediaCodec offload on Android + backup fallback
+            backupCodec: true,
+            degradationPreference: 'maintain-framerate',
             videoEncoding: {
-              maxBitrate: 900000,
-              maxFramerate: 30,
+              maxBitrate: 450000,
+              maxFramerate: 24,
+              priority: 'low', // Keep voice audio prioritized over video frames
             },
-          },
-        });
+          };
+          if (LK.VideoPresets && LK.VideoPresets.h180) {
+            publishDefaults.videoSimulcastLayers = [LK.VideoPresets.h180];
+          }
+
+          return new LK.Room({
+            adaptiveStream: true, // Scale down to PiP/slot size & cellular bandwidth
+            dynacast: true, // Pause higher simulcast layers when receiver doesn't consume them
+            audioCaptureDefaults: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              channelCount: 1,
+            },
+            videoCaptureDefaults: {
+              resolution: (LK.VideoPresets.h360 || LK.VideoPresets.h540).resolution,
+              facingMode: facing || 'user',
+              frameRate: 24,
+            },
+            publishDefaults: publishDefaults,
+          });
       }
 
       window.__CALL_BRIDGE__ = {
@@ -728,7 +747,7 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
           var shouldCaptureVideo = currentCallType === 'video' && !currentCameraOff;
           var audioConstraints = currentMicMuted
             ? false
-            : { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+            : { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 };
 
           var localAudioSettled = currentMicMuted;
           var remoteMediaSubscribed = false;
@@ -811,7 +830,11 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
             try {
               var vTracks = await LK.createLocalTracks({
                 audio: false,
-                video: { facingMode: currentFacing, resolution: VideoPresets.h540.resolution },
+                video: {
+                  facingMode: currentFacing,
+                  resolution: (VideoPresets.h360 || VideoPresets.h540).resolution,
+                  frameRate: 24,
+                },
               });
               vidTrack = vTracks.find(function (t) { return t.kind === Track.Kind.Video; }) || null;
             } catch (err) {
@@ -956,6 +979,15 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
 
             var publishedEarlyAudio = false;
             var publishPromiseEarly = null;
+            var micPublishOpts = {
+              source: Track.Source.Microphone,
+              simulcast: false,
+              dtx: true,
+              red: true,
+              audioPreset: LK.AudioPresets && LK.AudioPresets.speech
+                ? { maxBitrate: LK.AudioPresets.speech.maxBitrate, priority: 'high' }
+                : { maxBitrate: 24000, priority: 'high' },
+            };
 
             room.on(RoomEvent.SignalConnected, function () {
               // Publish microphone as soon as WebSocket signals join so audio negotiates without extra round-trip
@@ -963,10 +995,7 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
                 if (!track || publishedEarlyAudio || isDisconnecting || activeRoom !== room) return null;
                 publishedEarlyAudio = true;
                 return room.localParticipant
-                  .publishTrack(track, {
-                    source: Track.Source.Microphone,
-                    simulcast: false,
-                  })
+                  .publishTrack(track, micPublishOpts)
                   .then(function () {
                     pendingTracks = pendingTracks.filter(function (t) { return t !== track; });
                     localAudioSettled = true;
@@ -980,7 +1009,13 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
 
             activeRoom = room;
             room.startAudio().catch(function () {});
-            await room.connect(config.url, config.token);
+            await room.connect(config.url, config.token, {
+              autoSubscribe: true,
+              subscriberAllowPause: true,
+              rtcConfig: {
+                iceCandidatePoolSize: 4,
+              },
+            });
 
             if (isDisconnecting || activeSessionKey !== sessionKey) {
               try {
@@ -1029,6 +1064,11 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
               await connectedRoom.localParticipant.publishTrack(audioTrack, {
                 source: Track.Source.Microphone,
                 simulcast: false,
+                dtx: true,
+                red: true,
+                audioPreset: LK.AudioPresets && LK.AudioPresets.speech
+                  ? { maxBitrate: LK.AudioPresets.speech.maxBitrate, priority: 'high' }
+                  : { maxBitrate: 24000, priority: 'high' },
               }).catch(function () {});
               pendingTracks = pendingTracks.filter(function (t) { return t !== audioTrack; });
             } else if (currentMicMuted) {
@@ -1044,10 +1084,20 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
                 if (vidTrack) { try { vidTrack.stop(); } catch (e) {} }
                 return;
               }
-              await connectedRoom.localParticipant.publishTrack(vidTrack, {
+              var camPublishOpts = {
                 source: Track.Source.Camera,
-                simulcast: false,
-              }).catch(function () {});
+                simulcast: true,
+                degradationPreference: 'maintain-framerate',
+                videoEncoding: {
+                  maxBitrate: 450000,
+                  maxFramerate: 24,
+                  priority: 'low',
+                },
+              };
+              if (VideoPresets && VideoPresets.h180) {
+                camPublishOpts.videoSimulcastLayers = [VideoPresets.h180];
+              }
+              await connectedRoom.localParticipant.publishTrack(vidTrack, camPublishOpts).catch(function () {});
               pendingTracks = pendingTracks.filter(function (t) { return t !== vidTrack; });
             });
           } catch (err) {
@@ -1096,8 +1146,16 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
 
           if (activeRoom && activeRoom.localParticipant && window.LivekitClient) {
             var Track = window.LivekitClient.Track;
+            var VideoPresets = window.LivekitClient.VideoPresets;
             try {
-              await activeRoom.localParticipant.setCameraEnabled(enableCam);
+              var camCaptureOpts = enableCam
+                ? {
+                    facingMode: currentFacing,
+                    resolution: (VideoPresets.h360 || VideoPresets.h540).resolution,
+                    frameRate: 24,
+                  }
+                : undefined;
+              await activeRoom.localParticipant.setCameraEnabled(enableCam, camCaptureOpts);
               var camPub = activeRoom.localParticipant.getTrackPublication(Track.Source.Camera);
               var track = enableCam && camPub ? camPub.track || camPub.videoTrack || null : null;
               attachLocalVideo(track);
@@ -1132,7 +1190,8 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
           try {
             await camTrack.restartTrack({
               facingMode: targetFacing,
-              resolution: VideoPresets.h540.resolution,
+              resolution: (VideoPresets.h360 || VideoPresets.h540).resolution,
+              frameRate: 24,
             });
             attachLocalVideo(camTrack);
             post('LOCAL_MEDIA_STATE', { facingMode: targetFacing });
@@ -1142,7 +1201,8 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
               await new Promise(function (resolve) { setTimeout(resolve, 100); });
               await activeRoom.localParticipant.setCameraEnabled(true, {
                 facingMode: targetFacing,
-                resolution: VideoPresets.h540.resolution,
+                resolution: (VideoPresets.h360 || VideoPresets.h540).resolution,
+                frameRate: 24,
               });
               var nextPub = activeRoom.localParticipant.getTrackPublication(Track.Source.Camera);
               var nextTrack = nextPub ? (nextPub.videoTrack || nextPub.track) : null;

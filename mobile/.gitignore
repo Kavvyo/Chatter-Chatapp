@@ -41,3 +41,8 @@ example
 # generated native folders
 /ios
 /android
+
+# Firebase / Google Services keys & configs
+google-services.json
+GoogleService-Info.plist
+*firebase-adminsdk*.json

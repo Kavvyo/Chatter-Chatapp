@@ -16,6 +16,7 @@
     },
     "android": {
       "package": "com.kavindu.chatter",
+      "googleServicesFile": "./google-services.json",
       "usesCleartextTraffic": true,
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [

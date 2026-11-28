@@ -5,6 +5,7 @@ import { AccessToken } from 'livekit-server-sdk';
 import User from '../models/user.model.js';
 import { sendIncomingCallPush, sendMissedCallPush } from './pushNotifications.js';
 import { checkAreFriends } from './friendshipCache.js';
+import { relayOrQueueSticker, flushPendingStickersForUser } from './stickerRelay.js';
 import {
     buildMessagePayload,
     persistMessageInBackground,
@@ -56,9 +57,10 @@ const io = new Server(server, {
         credentials: true
     },
     transports: ["websocket", "polling"],
-    maxHttpBufferSize: 2 * 1024 * 1024,
-    pingTimeout: 10000,
-    pingInterval: 8000,
+    maxHttpBufferSize: 5 * 1024 * 1024,
+    pingTimeout: 20000,
+    pingInterval: 20000,
+    perMessageDeflate: false,
 });
 
 // Store connected sockets per user: userId -> Set<socket.id>
@@ -166,56 +168,42 @@ io.on("connection", (socket) => {
         if (typeof ack === "function") ack({ ok: true });
     });
 
-    // Ephemeral P2P sticker relay (zero server disk/DB/Cloudinary storage)
+    socket.on("requestOnlineUsers", () => {
+        socket.emit("getOnlineUsers", Array.from(userSocketsMap.keys()));
+    });
+
+    socket.on("syncPendingStickers", () => {
+        if (socket.userId) {
+            flushPendingStickersForUser(socket.userId, io);
+        }
+    });
+
+    // Reliable P2P sticker relay with temporary store-and-forward queue when recipient is offline
     socket.on("sendSticker", async (payload = {}, ack) => {
         try {
             const senderId = socket.userId;
             const { to, messageId, stickerHash, isAnimated, width, height, dataBase64, createdAt } = payload;
-
-            if (!senderId || !to || !messageId || !stickerHash) {
-                if (typeof ack === "function") ack({ ok: false, message: "Invalid sticker payload" });
-                return;
-            }
-
-            if (typeof dataBase64 === "string" && dataBase64.length > 1_400_000) {
-                if (typeof ack === "function") ack({ ok: false, message: "Sticker exceeds 1 MB limit" });
-                return;
-            }
-
-            const targetId = to.toString();
-            const areFriends = await checkAreFriends(senderId, targetId);
-            if (!areFriends) {
-                if (typeof ack === "function") ack({ ok: false, message: "You must be friends to send stickers." });
-                return;
-            }
-
-            const targetSockets = userSocketsMap.get(targetId);
+            const targetId = to ? to.toString() : "";
+            const targetSockets = targetId ? userSocketsMap.get(targetId) : null;
             const isTargetOnline = Boolean(targetSockets && targetSockets.size > 0);
-            if (!isTargetOnline) {
-                if (typeof ack === "function") {
-                    ack({ ok: true, delivered: false, offline: true, messageId });
-                }
-                return;
-            }
 
-            const wireSticker = {
-                _id: messageId.toString(),
-                senderId: senderId.toString(),
-                receiverId: targetId,
-                isSticker: true,
-                stickerHash: stickerHash.toString(),
-                isAnimated: Boolean(isAnimated),
-                width: width || 512,
-                height: height || 512,
-                ...(typeof dataBase64 === "string" && dataBase64.length > 0 ? { dataBase64 } : {}),
-                createdAt: createdAt || new Date().toISOString(),
-            };
-
-            io.to(targetId).emit("newSticker", wireSticker);
-            socket.to(senderId.toString()).emit("newSticker", wireSticker);
+            const result = await relayOrQueueSticker({
+                senderId,
+                targetId,
+                messageId,
+                stickerHash,
+                isAnimated,
+                width,
+                height,
+                dataBase64,
+                createdAt,
+                io,
+                isTargetOnline,
+                excludeSenderSocket: socket,
+            });
 
             if (typeof ack === "function") {
-                ack({ ok: true, delivered: true, offline: false, messageId });
+                ack(result);
             }
         } catch (err) {
             if (typeof ack === "function") {
@@ -262,6 +250,12 @@ io.on("connection", (socket) => {
                 sockets.delete(socket.id);
                 if (sockets.size === 0) {
                     userSocketsMap.delete(uid);
+                    const lastSeen = new Date();
+                    User.findByIdAndUpdate(uid, { lastSeen }).catch(() => {});
+                    io.emit("userLastSeen", {
+                        userId: uid,
+                        lastSeen: lastSeen.toISOString(),
+                    });
                 }
             }
         }

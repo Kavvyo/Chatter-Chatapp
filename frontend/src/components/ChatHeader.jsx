@@ -7,9 +7,22 @@ import { useEffect, useRef, useState } from "react";
 import VerticalMenu from "./VerticalMenu";
 import AlertDialogBox from "./AlertDialogBox";
 
+function formatLastSeen(iso) {
+  if (!iso) return "Offline";
+  const ts = new Date(iso).getTime();
+  if (Number.isNaN(ts)) return "Offline";
+  const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (diffSec < 60) return "Last seen just now";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `Last seen ${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `Last seen ${diffHr}h ago`;
+  return `Last seen ${new Date(ts).toLocaleDateString()}`;
+}
+
 const ChatHeader = () => {
   const { selectedUser, setSelectedUser, typingUsers } = useChatStore();
-  const { onlineUsers } = useAuthStore();
+  const { onlineUsers, lastSeenMap, isSocketConnected } = useAuthStore();
   const { callUser } = useCallStore();
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
@@ -33,6 +46,8 @@ const ChatHeader = () => {
 
   const isOnline = onlineUsers.includes(selectedUser._id);
   const isTyping = Boolean(typingUsers?.[selectedUser._id]);
+  const lastSeenIso = lastSeenMap?.[selectedUser._id] || selectedUser.lastSeen;
+  const offlineLabel = !isSocketConnected ? "Connecting..." : formatLastSeen(lastSeenIso);
 
   return (
     <div className="relative z-30 px-3.5 py-2.5 border-b border-base-300/60 bg-base-100/95 backdrop-blur-sm max-sm:fixed max-sm:top-0 max-sm:left-0 max-sm:right-0 max-sm:z-40">
@@ -75,7 +90,7 @@ const ChatHeader = () => {
                   : "text-base-content/55"
               }`}
             >
-              {isTyping ? "typing..." : isOnline ? "Online" : "Offline"}
+              {isTyping ? "typing..." : isOnline ? "Online" : offlineLabel}
             </p>
           </div>
         </div>

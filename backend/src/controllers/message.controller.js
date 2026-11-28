@@ -12,6 +12,8 @@ import {
     cancelPendingForConversation,
 } from "../lib/messageService.js";
 import ConversationClear, { getConversationPairKey } from "../models/conversationClear.model.js";
+import PendingSticker from "../models/pendingSticker.model.js";
+import { relayOrQueueSticker } from "../lib/stickerRelay.js";
 
 export const getUserForSidebar = async (req, res) => {
     try {
@@ -164,6 +166,42 @@ export const sendMessages = async (req, res) => {
     }
 }
 
+export const sendStickerHttp = async (req, res) => {
+    try {
+        const senderId = req.user._id;
+        const { id: targetId } = req.params;
+        const {
+            messageId,
+            stickerHash,
+            isAnimated,
+            width,
+            height,
+            dataBase64,
+            createdAt,
+        } = req.body || {};
+
+        const isTargetOnline = Boolean(getReciverSocketId(targetId));
+        const result = await relayOrQueueSticker({
+            senderId,
+            targetId,
+            messageId,
+            stickerHash,
+            isAnimated,
+            width,
+            height,
+            dataBase64,
+            createdAt,
+            io,
+            isTargetOnline,
+        });
+
+        return res.status(result.status || 200).json(result);
+    } catch (error) {
+        console.log("Error in sendStickerHttp:", error.message);
+        return res.status(500).json({ ok: false, message: "Internal Server Error" });
+    }
+};
+
 export const deleteAllMessages = async (req, res) => {
     try {
         const {id: receiverId} = req.params;
@@ -180,6 +218,12 @@ export const deleteAllMessages = async (req, res) => {
                     {senderId: myId, receiverId: receiverId},
                     {senderId: receiverId, receiverId: myId}
                 ]
+            }),
+            PendingSticker.deleteMany({
+                $or: [
+                    { from: myId, to: receiverId },
+                    { from: receiverId, to: myId },
+                ],
             }),
             ConversationClear.findOneAndUpdate(
                 { participantsKey: pairKey },

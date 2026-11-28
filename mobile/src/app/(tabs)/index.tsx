@@ -20,12 +20,24 @@ import Avatar from '../../components/ui/Avatar';
 
 type FilterType = 'all' | 'online' | 'unread';
 
+function formatShortLastSeen(iso?: string | null): string {
+  if (!iso) return 'Offline';
+  const ts = new Date(iso).getTime();
+  if (Number.isNaN(ts)) return 'Offline';
+  const diffMin = Math.max(0, Math.floor((Date.now() - ts) / 60000));
+  if (diffMin < 1) return 'Just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  return new Date(ts).toLocaleDateString();
+}
+
 export default function ChatsTab() {
   const router = useRouter();
   const { theme } = useThemeStore();
   const { setSelectedUser, unreadCounts, fetchUnreadCounts } = useChatStore();
   const { friends, getFriends } = useFriendsStore();
-  const { authUser, onlineUsers } = useAuthStore();
+  const { authUser, onlineUsers, lastSeenMap } = useAuthStore();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<FilterType>('all');
@@ -107,7 +119,7 @@ export default function ChatsTab() {
               {item.fullName}
             </Text>
             <Text style={[styles.timeText, { color: theme.baseContentMuted }]}>
-              {isOnline ? 'Active' : 'Offline'}
+              {isOnline ? 'Active' : formatShortLastSeen(lastSeenMap[item._id] || item.lastSeen)}
             </Text>
           </View>
 

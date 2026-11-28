@@ -17,6 +17,7 @@ export interface AuthUser {
   email: string;
   profilePic?: string;
   isVerified: boolean;
+  lastSeen?: string | null;
   createdAt?: string;
 }
 
@@ -28,6 +29,8 @@ interface AuthState {
   isVerifying: boolean;
   isCheckingAuth: boolean;
   onlineUsers: string[];
+  lastSeenMap: Record<string, string>;
+  isSocketConnected: boolean;
   socket: Socket | null;
 
   checkAuth: () => Promise<void>;
@@ -56,9 +59,26 @@ function hydrateDataStores(userId: string) {
 }
 
 let appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
+let heartbeatWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+let disconnectGraceTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearSocketTimers() {
+  if (heartbeatWatchdogTimer) {
+    clearInterval(heartbeatWatchdogTimer);
+    heartbeatWatchdogTimer = null;
+  }
+  if (disconnectGraceTimer) {
+    clearTimeout(disconnectGraceTimer);
+    disconnectGraceTimer = null;
+  }
+}
 
 function syncChatStateOnActiveOrConnect() {
   try {
+    const { socket } = useAuthStore.getState();
+    if (socket?.connected && typeof socket.hasListeners === 'function' && socket.hasListeners('newSticker')) {
+      socket.emit('syncPendingStickers');
+    }
     const { useChatStore } = require('./useChatStore');
     const chatState = useChatStore.getState();
     chatState.fetchUnreadCounts();
@@ -80,6 +100,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   isVerifying: false,
   isCheckingAuth: true,
   onlineUsers: [],
+  lastSeenMap: {},
+  isSocketConnected: false,
   socket: null,
 
   checkAuth: async () => {
@@ -251,16 +273,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       query: {
         userId: authUser._id,
       },
-      transports: ['websocket'],
+      // Allow HTTP polling handshake first on restrictive cellular APNs, then upgrade to WebSocket
+      transports: ['polling', 'websocket'],
+      upgrade: true,
+      rememberUpgrade: true,
+      timeout: 20000,
       reconnection: true,
+      reconnectionAttempts: Infinity,
       reconnectionDelay: 500,
-      reconnectionDelayMax: 3000,
+      reconnectionDelayMax: 4000,
     });
 
-    set({ socket });
+    set({ socket, isSocketConnected: socket.connected });
 
     socket.on('getOnlineUsers', (userIds: string[]) => {
-      set({ onlineUsers: userIds });
+      set({ onlineUsers: Array.isArray(userIds) ? userIds.map(String) : [] });
       try {
         const { useChatStore } = require('./useChatStore');
         useChatStore.getState().flushPendingStickers();
@@ -269,7 +296,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
     });
 
+    socket.on('userLastSeen', ({ userId, lastSeen }: { userId?: string; lastSeen?: string }) => {
+      if (!userId || !lastSeen) return;
+      set((state) => ({
+        lastSeenMap: { ...state.lastSeenMap, [userId.toString()]: lastSeen },
+      }));
+    });
+
     socket.on('connect', () => {
+      if (disconnectGraceTimer) {
+        clearTimeout(disconnectGraceTimer);
+        disconnectGraceTimer = null;
+      }
+      set({ isSocketConnected: true });
+      socket.emit('requestOnlineUsers');
+
       try {
         const { useCallStore } = require('./useCallStore');
         const pendingDecline = useCallStore.getState().pendingDeclineCallerId;
@@ -284,47 +325,68 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       syncChatStateOnActiveOrConnect();
     });
 
+    socket.on('disconnect', () => {
+      set({ isSocketConnected: false });
+      if (disconnectGraceTimer) clearTimeout(disconnectGraceTimer);
+      disconnectGraceTimer = setTimeout(() => {
+        if (!get().isSocketConnected) {
+          set({ onlineUsers: [] });
+        }
+      }, 4500);
+    });
+
+    const probeOrReconnectSocket = () => {
+      const { authUser: currentUser, socket: activeSocket, connectSocket: ensureConnect } = get();
+      if (!currentUser) return;
+      if (!activeSocket) {
+        ensureConnect();
+        return;
+      }
+      if (!activeSocket.connected) {
+        activeSocket.connect();
+        return;
+      }
+
+      // Detect silent half-open CGNAT / cellular tower-handoff sockets quickly
+      activeSocket.timeout(2500).emit('heartbeat', (err: any) => {
+        if (err) {
+          try {
+            activeSocket.disconnect();
+          } catch {
+            // ignore
+          }
+          activeSocket.connect();
+        } else {
+          activeSocket.emit('requestOnlineUsers');
+          syncChatStateOnActiveOrConnect();
+        }
+      });
+    };
+
+    if (!heartbeatWatchdogTimer) {
+      heartbeatWatchdogTimer = setInterval(() => {
+        if (AppState.currentState === 'active') {
+          probeOrReconnectSocket();
+        }
+      }, 15000);
+    }
+
     if (!appStateSubscription) {
       let lastAppState: string = AppState.currentState || 'active';
       appStateSubscription = AppState.addEventListener('change', (nextState) => {
         const wasBackground = lastAppState !== 'active';
         lastAppState = nextState;
         if (!wasBackground || nextState !== 'active') return;
-
-        const { authUser: currentUser, socket: activeSocket, connectSocket: ensureConnect } = get();
-        if (!currentUser) return;
-
-        if (!activeSocket) {
-          ensureConnect();
-          return;
-        }
-
-        if (!activeSocket.connected) {
-          activeSocket.connect();
-          return;
-        }
-
-        // Probe for OS-suspended zombie TCP sockets instead of waiting for pingTimeout
-        activeSocket.timeout(1200).emit('heartbeat', (err: any) => {
-          if (err) {
-            try {
-              activeSocket.disconnect();
-            } catch {
-              // ignore
-            }
-            activeSocket.connect();
-          } else {
-            syncChatStateOnActiveOrConnect();
-          }
-        });
+        probeOrReconnectSocket();
       });
     }
   },
 
   disConnectSocket: () => {
+    clearSocketTimers();
     if (get().socket) {
       get().socket?.disconnect();
     }
-    set({ socket: null });
+    set({ socket: null, isSocketConnected: false, onlineUsers: [] });
   },
 }));

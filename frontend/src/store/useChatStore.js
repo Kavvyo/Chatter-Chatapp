@@ -41,16 +41,16 @@ function emitStickerOverSocket({
 }) {
   const socket = useAuthStore.getState().socket;
   if (!socket?.connected) {
-    return Promise.resolve({ ok: false, delivered: false });
+    return Promise.resolve({ ok: false, delivered: false, serverQueued: false });
   }
   return new Promise((resolve) => {
     let settled = false;
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true;
-        resolve({ ok: false, delivered: false });
+        resolve({ ok: false, delivered: false, serverQueued: false });
       }
-    }, 10000);
+    }, 15000);
 
     socket.emit(
       "sendSticker",
@@ -66,10 +66,58 @@ function emitStickerOverSocket({
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        resolve(ack || { ok: false, delivered: false });
+        if (ack?.ok === false) {
+          resolve({ ok: false, delivered: false, serverQueued: false, error: ack.message });
+        } else {
+          resolve({
+            ok: true,
+            delivered: Boolean(ack?.delivered),
+            serverQueued: Boolean(ack?.serverQueued),
+          });
+        }
       }
     );
   });
+}
+
+async function dispatchStickerReliable(params) {
+  const sockRes = await emitStickerOverSocket(params);
+  if (sockRes.error || sockRes.delivered || sockRes.serverQueued) {
+    return sockRes;
+  }
+
+  try {
+    const httpRes = await axiosInstanace.post(
+      `/messages/sticker/${params.peerId}`,
+      {
+        messageId: params.messageId,
+        stickerHash: params.stickerHash,
+        isAnimated: Boolean(params.isAnimated),
+        width: 512,
+        height: 512,
+        ...(params.dataBase64 ? { dataBase64: params.dataBase64 } : {}),
+        createdAt: params.createdAt,
+      },
+      { timeout: 25000 }
+    );
+    return {
+      ok: Boolean(httpRes.data?.ok),
+      delivered: Boolean(httpRes.data?.delivered),
+      serverQueued: Boolean(httpRes.data?.serverQueued),
+      error: httpRes.data?.ok === false ? httpRes.data?.message : undefined,
+    };
+  } catch (err) {
+    const status = err?.response?.status;
+    if (status && status >= 400 && status < 500) {
+      return {
+        ok: false,
+        delivered: false,
+        serverQueued: false,
+        error: err?.response?.data?.message || "Sticker could not be sent",
+      };
+    }
+    return { ok: false, delivered: false, serverQueued: false };
+  }
 }
 
 async function queueStickerOutboxItem(myId, item) {
@@ -255,7 +303,7 @@ export const useChatStore = create((set, get) => ({
         }
 
         const peerId = selectedUser._id;
-        const { authUser, socket } = useAuthStore.getState();
+        const { authUser } = useAuthStore.getState();
         const myId = authUser?._id;
         if (!myId) return { success: false, message: "Not authenticated" };
 
@@ -305,7 +353,7 @@ export const useChatStore = create((set, get) => ({
 
         saveLocalStickerMessage(myId, peerId, {
             ...localStickerMsg,
-            stickerStatus: socket?.connected ? "sent" : "queued",
+            stickerStatus: "queued",
         });
         useStickerStore.getState().recordRecentSticker(sticker).catch(() => {});
 
@@ -319,29 +367,33 @@ export const useChatStore = create((set, get) => ({
             return { success: false, message: "Sticker file missing from local browser storage" };
         }
 
-        if (socket?.connected) {
-            const result = await emitStickerOverSocket({
-                peerId,
-                messageId,
-                stickerHash: sticker.stickerHash,
-                isAnimated: sticker.isAnimated,
-                createdAt,
-                dataBase64,
-            });
+        const result = await dispatchStickerReliable({
+            peerId,
+            messageId,
+            stickerHash: sticker.stickerHash,
+            isAnimated: sticker.isAnimated,
+            createdAt,
+            dataBase64,
+        });
 
-            if (result.error) {
-                patchOpenMessage(messageId, { stickerStatus: "queued" });
-                toast.error(result.error);
-                return { success: false, message: result.error };
-            }
+        if (result.error) {
+            patchOpenMessage(messageId, { stickerStatus: "queued" });
+            toast.error(result.error);
+            return { success: false, message: result.error };
+        }
 
+        if (result.delivered || result.serverQueued) {
             if (result.delivered) {
                 markStickerHashKnownByPeer(peerId, sticker.stickerHash);
-                const minSpin = Math.max(0, 340 - (Date.now() - now));
-                if (minSpin > 0) await new Promise((r) => setTimeout(r, minSpin));
-                patchOpenMessage(messageId, { stickerStatus: "sent" });
-                return { success: true };
             }
+            const minSpin = Math.max(0, 340 - (Date.now() - now));
+            if (minSpin > 0) await new Promise((r) => setTimeout(r, minSpin));
+            saveLocalStickerMessage(myId, peerId, {
+                ...localStickerMsg,
+                stickerStatus: "sent",
+            });
+            patchOpenMessage(messageId, { stickerStatus: "sent" });
+            return { success: true };
         }
 
         patchOpenMessage(messageId, { stickerStatus: "queued" });
@@ -355,26 +407,20 @@ export const useChatStore = create((set, get) => ({
         return { success: true };
     },
 
-    flushStickerOutbox: async (onlineUserIds) => {
+    flushStickerOutbox: async () => {
         if (isFlushingOutbox) return;
-        const { authUser, socket } = useAuthStore.getState();
+        const { authUser } = useAuthStore.getState();
         const myId = authUser?._id;
-        if (!myId || !socket?.connected) return;
+        if (!myId) return;
 
         isFlushingOutbox = true;
         try {
             const queue = await getStickerOutbox(myId);
             if (!queue.length) return;
 
-            const onlineSet = onlineUserIds ? new Set(onlineUserIds.map(String)) : null;
             const remaining = [];
 
             for (const item of queue) {
-                if (onlineSet && !onlineSet.has(item.peerId?.toString())) {
-                    remaining.push(item);
-                    continue;
-                }
-
                 const peerHas = sentStickerHashesByPeer.get(item.peerId)?.has(item.stickerHash);
                 const dataBase64 = peerHas ? null : await readStickerBase64(item.stickerHash);
                 if (!peerHas && !dataBase64) {
@@ -391,7 +437,7 @@ export const useChatStore = create((set, get) => ({
                     };
                 });
 
-                const res = await emitStickerOverSocket({
+                const res = await dispatchStickerReliable({
                     peerId: item.peerId,
                     messageId: item.messageId,
                     stickerHash: item.stickerHash,
@@ -400,8 +446,10 @@ export const useChatStore = create((set, get) => ({
                     dataBase64,
                 });
 
-                if (res.delivered) {
-                    markStickerHashKnownByPeer(item.peerId, item.stickerHash);
+                if (res.delivered || res.serverQueued) {
+                    if (res.delivered) {
+                        markStickerHashKnownByPeer(item.peerId, item.stickerHash);
+                    }
                     const minSpin = Math.max(0, 320 - (Date.now() - startedAt));
                     if (minSpin > 0) await new Promise((r) => setTimeout(r, minSpin));
                     set((state) => {
@@ -412,7 +460,7 @@ export const useChatStore = create((set, get) => ({
                             ),
                         };
                     });
-                } else if (!res.error) {
+                } else {
                     set((state) => {
                         if (state.selectedUser?._id !== item.peerId) return state;
                         return {
@@ -421,7 +469,9 @@ export const useChatStore = create((set, get) => ({
                             ),
                         };
                     });
-                    remaining.push(item);
+                    if (!res.error) {
+                        remaining.push(item);
+                    }
                 }
             }
 
@@ -704,7 +754,7 @@ export const useChatStore = create((set, get) => ({
             const dataBase64 = await readStickerBase64(stickerHash);
             if (!dataBase64) return;
             const targetId = from.toString();
-            const res = await emitStickerOverSocket({
+            const res = await dispatchStickerReliable({
                 peerId: targetId,
                 messageId: messageId || `stk_res_${Date.now()}`,
                 stickerHash,
@@ -715,6 +765,10 @@ export const useChatStore = create((set, get) => ({
                 markStickerHashKnownByPeer(targetId, stickerHash);
             }
         });
+
+        if (socket.connected) {
+            socket.emit("syncPendingStickers");
+        }
 
     },
 

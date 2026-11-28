@@ -8,12 +8,17 @@ import { useStickerStore } from './useStickerStore.js';
 
 const BASE_URL = import.meta.env.MODE === "development" ? "http://localhost:5001": "/";
 
+let webPresenceListenersBound = false;
+let webDisconnectGraceTimer = null;
+
 export const useAuthStore = create((set, get) => ({
     authUser: null,
     isSigningUp: false,
     isLoggingIn:false,
     isUpdatingProfile: false,
     onlineUsers: [],
+    lastSeenMap: {},
+    isSocketConnected: false,
     socket: null,
     isCheckingAuth: true,
     isVerifing: false,
@@ -111,38 +116,112 @@ export const useAuthStore = create((set, get) => ({
         const {authUser} = get();
         if(!authUser|| get().socket?.connected) return;
 
+        const existing = get().socket;
+        if (existing) {
+            if (!existing.connected) existing.connect();
+            return;
+        }
+
         const socket = io(BASE_URL, {
             query: {
                 userId: authUser._id,
             },
             transports: ["websocket", "polling"],
+            timeout: 20000,
+            reconnection: true,
+            reconnectionDelay: 500,
+            reconnectionDelayMax: 4000,
         });
 
         
-        set({socket: socket});
+        set({socket: socket, isSocketConnected: socket.connected});
         
         // Immediately bind call socket listeners & hydrate local IndexedDB stickers
         useStickerStore.getState().hydrateStickers();
         useCallStore.getState().initializeSocketListeners(socket);
         socket.on("connect", () => {
+            if (webDisconnectGraceTimer) {
+                clearTimeout(webDisconnectGraceTimer);
+                webDisconnectGraceTimer = null;
+            }
+            set({ isSocketConnected: true });
+            socket.emit("requestOnlineUsers");
+            if (typeof socket.hasListeners === "function" && socket.hasListeners("newSticker")) {
+                socket.emit("syncPendingStickers");
+            }
             useCallStore.getState().initializeSocketListeners(socket);
             useChatStore.getState().flushStickerOutbox(get().onlineUsers);
         });
 
+        socket.on("disconnect", () => {
+            set({ isSocketConnected: false });
+            if (webDisconnectGraceTimer) clearTimeout(webDisconnectGraceTimer);
+            webDisconnectGraceTimer = setTimeout(() => {
+                if (!get().isSocketConnected) {
+                    set({ onlineUsers: [] });
+                }
+            }, 4500);
+        });
+
         socket.on("getOnlineUsers", (userIds) => {
-            set({onlineUsers: userIds});
-            useChatStore.getState().flushStickerOutbox(userIds);
+            const normalized = Array.isArray(userIds) ? userIds.map(String) : [];
+            set({onlineUsers: normalized});
+            useChatStore.getState().flushStickerOutbox(normalized);
+        });
+
+        socket.on("userLastSeen", ({ userId, lastSeen }) => {
+            if (!userId || !lastSeen) return;
+            set((state) => ({
+                lastSeenMap: { ...state.lastSeenMap, [userId.toString()]: lastSeen },
+            }));
         });
 
         socket.on("newFriendship", (newFriendship) => {
             console.log("Received new friend request:", newFriendship);
             toast.success(`${newFriendship.requester.fullName} sent you a friend request`);
         });
+
+        if (!webPresenceListenersBound && typeof window !== "undefined") {
+            webPresenceListenersBound = true;
+            const probeSocket = () => {
+                const { authUser: currentUser, socket: activeSocket, connectSocket } = get();
+                if (!currentUser) return;
+                if (!activeSocket) {
+                    connectSocket();
+                    return;
+                }
+                if (!activeSocket.connected) {
+                    activeSocket.connect();
+                    return;
+                }
+                activeSocket.timeout(2500).emit("heartbeat", (err) => {
+                    if (err) {
+                        try {
+                            activeSocket.disconnect();
+                        } catch {
+                            // ignore socket teardown error before reconnect
+                        }
+                        activeSocket.connect();
+                    } else {
+                        activeSocket.emit("requestOnlineUsers");
+                    }
+                });
+            };
+            window.addEventListener("online", probeSocket);
+            document.addEventListener("visibilitychange", () => {
+                if (document.visibilityState === "visible") probeSocket();
+            });
+        }
     },
 
     disConnectSocket: () => {
+        if (webDisconnectGraceTimer) {
+            clearTimeout(webDisconnectGraceTimer);
+            webDisconnectGraceTimer = null;
+        }
         useCallStore.getState().uninitializeSocketListeners();
         if(get().socket?.connected) get().socket.disconnect();
+        set({ socket: null, isSocketConnected: false, onlineUsers: [] });
     },
 
     OtpVerify: async (data) => {
