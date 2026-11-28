@@ -1,8 +1,9 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { Lock, Phone, PhoneOff, Video } from 'lucide-react-native';
+import { StatusBar } from 'expo-status-bar';
+import { Phone, PhoneOff, Video } from 'lucide-react-native';
 import { useCallStore } from '../../store/useCallStore';
-import Avatar from '../ui/Avatar';
+import { CallFullScreenBackdrop } from './CallFullScreenBackdrop';
 
 export const IncomingCallModal = () => {
   const {
@@ -21,61 +22,44 @@ export const IncomingCallModal = () => {
 
   return (
     <View style={styles.overlay}>
-      {/* Top Info */}
-      <View style={styles.topSection}>
-        <View style={styles.encryptedRow}>
-          <Lock size={12} color="#8696a0" />
-          <Text style={styles.encryptedText}>
-            {isVoice ? 'Chatter Voice Call' : 'Chatter Video Call'}
-          </Text>
-        </View>
+      <StatusBar style="light" />
 
-        <Text style={styles.callerName} numberOfLines={1}>
-          {callerName || 'Incoming Caller'}
-        </Text>
-        <Text style={styles.statusText}>
-          {isVoice ? 'Ringing • Voice' : 'Ringing • Video'}
-        </Text>
-      </View>
+      {/* Full-screen darkened caller portrait + centered name header */}
+      <CallFullScreenBackdrop
+        avatarUri={callerAvatar}
+        name={callerName || 'Incoming Caller'}
+        subtitle={isVoice ? 'Chatter Audio...' : 'Chatter Video...'}
+        showPhoto={true}
+      />
 
-      {/* Center Pulsing Caller Avatar */}
-      <View style={styles.centerSection}>
-        <View style={styles.avatarContainer}>
-          <View style={styles.outerPulse} />
-          <View style={styles.innerPulse} />
-          <Avatar
-            uri={callerAvatar}
-            size={128}
-            imageStyle={{ borderWidth: 3, borderColor: 'rgba(16, 185, 129, 0.5)' }}
-          />
-          <View style={styles.typeBadge}>
-            {isVoice ? <Phone size={15} color="#ffffff" /> : <Video size={15} color="#ffffff" />}
+      {/* Bottom Decline / Accept circular buttons directly over darkened portrait */}
+      <View style={styles.bottomArea}>
+        <View style={styles.primaryRow}>
+          <View style={styles.actionCol}>
+            <TouchableOpacity
+              onPress={() => rejectCall()}
+              style={[styles.primaryBtn, styles.declineBtn]}
+              activeOpacity={0.85}
+            >
+              <PhoneOff size={28} color="#ffffff" />
+            </TouchableOpacity>
+            <Text style={styles.primaryLabel}>Decline</Text>
           </View>
-        </View>
-      </View>
 
-      {/* Bottom Ergonomic WhatsApp-Style Action Buttons */}
-      <View style={styles.actions}>
-        <View style={styles.actionCol}>
-          <TouchableOpacity
-            onPress={() => rejectCall()}
-            style={[styles.button, styles.declineBtn]}
-            activeOpacity={0.85}
-          >
-            <PhoneOff size={28} color="#ffffff" />
-          </TouchableOpacity>
-          <Text style={styles.btnLabel}>Decline</Text>
-        </View>
-
-        <View style={styles.actionCol}>
-          <TouchableOpacity
-            onPress={answerCall}
-            style={[styles.button, styles.acceptBtn]}
-            activeOpacity={0.85}
-          >
-            {isVoice ? <Phone size={28} color="#ffffff" /> : <Video size={28} color="#ffffff" />}
-          </TouchableOpacity>
-          <Text style={styles.btnLabel}>Accept</Text>
+          <View style={styles.actionCol}>
+            <TouchableOpacity
+              onPress={answerCall}
+              style={[styles.primaryBtn, styles.acceptBtn]}
+              activeOpacity={0.85}
+            >
+              {isVoice ? (
+                <Phone size={28} color="#ffffff" />
+              ) : (
+                <Video size={28} color="#ffffff" />
+              )}
+            </TouchableOpacity>
+            <Text style={styles.primaryLabel}>Accept</Text>
+          </View>
         </View>
       </View>
     </View>
@@ -90,103 +74,48 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     zIndex: 1000,
-    backgroundColor: '#0b141a',
+    backgroundColor: '#111827',
+    justifyContent: 'flex-end',
+  },
+  bottomArea: {
+    zIndex: 20,
+    paddingHorizontal: 46,
+    paddingBottom: 56,
+  },
+  primaryRow: {
+    flexDirection: 'row',
     justifyContent: 'space-between',
-    paddingTop: 72,
-    paddingBottom: 60,
-    paddingHorizontal: 28,
-  },
-  topSection: {
     alignItems: 'center',
-    gap: 8,
-  },
-  encryptedRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 4,
-  },
-  encryptedText: {
-    color: '#8696a0',
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  callerName: {
-    color: '#e9edef',
-    fontSize: 30,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  statusText: {
-    color: '#8696a0',
-    fontSize: 15,
-    fontWeight: '500',
-  },
-  centerSection: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  avatarContainer: {
-    width: 176,
-    height: 176,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  outerPulse: {
-    position: 'absolute',
-    width: 176,
-    height: 176,
-    borderRadius: 88,
-    backgroundColor: 'rgba(0, 168, 132, 0.12)',
-  },
-  innerPulse: {
-    position: 'absolute',
-    width: 152,
-    height: 152,
-    borderRadius: 76,
-    backgroundColor: 'rgba(0, 168, 132, 0.2)',
-  },
-  typeBadge: {
-    position: 'absolute',
-    bottom: 18,
-    right: 18,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: '#00a884',
-    borderWidth: 2,
-    borderColor: '#0b141a',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  actions: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
-    paddingHorizontal: 16,
   },
   actionCol: {
     alignItems: 'center',
     gap: 10,
+    width: 78,
   },
-  button: {
-    width: 68,
-    height: 68,
-    borderRadius: 34,
+  primaryBtn: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
     justifyContent: 'center',
     alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
     elevation: 10,
   },
   declineBtn: {
-    backgroundColor: '#ef4444',
+    backgroundColor: '#ff3b30',
   },
   acceptBtn: {
-    backgroundColor: '#00a884',
+    backgroundColor: '#34c759',
   },
-  btnLabel: {
-    color: '#d1d7db',
+  primaryLabel: {
+    color: '#ffffff',
     fontSize: 14,
-    fontWeight: '600',
+    fontWeight: '500',
+    textShadowColor: 'rgba(0, 0, 0, 0.45)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
 });

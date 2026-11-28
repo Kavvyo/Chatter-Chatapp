@@ -95,14 +95,14 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
       width: 100%;
       height: 100%;
       overflow: hidden;
-      background-color: #0b141a;
+      background-color: transparent;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
 
     .video-box {
       position: fixed;
       overflow: hidden;
-      background-color: #0b141a;
+      background-color: transparent;
       transition:
         top 220ms cubic-bezier(0.22, 1, 0.36, 1),
         left 220ms cubic-bezier(0.22, 1, 0.36, 1),
@@ -123,7 +123,12 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
       border-radius: 0 !important;
       border: none !important;
       box-shadow: none !important;
+      background-color: transparent;
       z-index: 1;
+    }
+
+    .video-box.slot-main .off-placeholder {
+      display: none !important;
     }
 
     .video-box.slot-pip {

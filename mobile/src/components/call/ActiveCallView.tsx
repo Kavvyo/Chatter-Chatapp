@@ -15,10 +15,9 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import {
-  ArrowLeftRight,
   ChevronDown,
-  Lock,
   Maximize2,
+  MessageSquare,
   Mic,
   MicOff,
   PhoneOff,
@@ -41,6 +40,7 @@ import {
   isInSystemPictureInPicture,
 } from '../../lib/callAudio';
 import Avatar from '../ui/Avatar';
+import { CallFullScreenBackdrop } from './CallFullScreenBackdrop';
 
 function formatDuration(seconds: number) {
   const mins = Math.floor(seconds / 60);
@@ -78,7 +78,6 @@ export const ActiveCallView = () => {
     toggleMic,
     toggleCamera,
     toggleSpeaker,
-    toggleSwap,
     setMinimized,
     setControlsVisible,
     switchCamera,
@@ -114,7 +113,6 @@ export const ActiveCallView = () => {
     return () => sub.remove();
   }, []);
 
-  // Re-clamp floating PiP coordinates when callType or window dimensions change
   useEffect(() => {
     const maxX = Math.max(PIP_EDGE, windowSize.width - pipWidth - PIP_EDGE);
     const maxY = Math.max(54, windowSize.height - pipHeight - 96);
@@ -174,7 +172,6 @@ export const ActiveCallView = () => {
     [pan, setMinimized]
   );
 
-  // Memoize source with empty deps so duration timer updates never reload the WebView page
   const webViewSource = useMemo(
     () => ({ html: BRIDGE_HTML, baseUrl: WEBRTC_SECURE_ORIGIN }),
     []
@@ -241,7 +238,6 @@ export const ActiveCallView = () => {
     };
   }, [callActive, registerBridgeCommandHandler]);
 
-  // Trigger LiveKit connection inside WebView once SDK & credentials are ready
   useEffect(() => {
     if (
       Platform.OS === 'web' ||
@@ -277,7 +273,7 @@ export const ActiveCallView = () => {
     );
   }, [callActive, sdkReady, roomName, preparedToken, preparedUrl]);
 
-  // Android Hardware Back minimizes fullscreen call into floating In-App PiP (WhatsApp style)
+  // Android Hardware Back minimizes fullscreen call into floating In-App PiP
   useEffect(() => {
     if (!callActive || isMinimized || Platform.OS !== 'android') return;
 
@@ -289,7 +285,7 @@ export const ActiveCallView = () => {
     return () => sub.remove();
   }, [callActive, isMinimized, setMinimized]);
 
-  // Enter Android OS System PiP automatically when leaving app during an active connected video call
+  // Enter Android OS System PiP automatically when leaving app during connected video calls
   useEffect(() => {
     if (!callActive || Platform.OS !== 'android') return;
 
@@ -310,7 +306,7 @@ export const ActiveCallView = () => {
     return () => sub.remove();
   }, [callActive]);
 
-  // Animate & auto-hide WhatsApp overlay controls after 4.5s on connected video calls
+  // Auto-hide controls after 4.5s ONLY when live remote video is visible
   useEffect(() => {
     Animated.timing(controlsOpacity, {
       toValue: controlsVisible ? 1 : 0,
@@ -364,8 +360,19 @@ export const ActiveCallView = () => {
   const participantAvatar = targetUser?.profilePic || callerAvatar || '';
   const isConnected = callStatus === 'connected';
   const showRemoteVideo = !isVoice && remoteHasVideo && !remoteVideoMuted;
-  const showMainPlaceholder = !isVoice && !isSwapped && !showRemoteVideo;
-  const showControls = (isVoice || controlsVisible) && !isMinimized && !systemPip;
+  const showFullScreenPhoto = !showRemoteVideo && !(isSwapped && !isCameraOff);
+  const showControls = (isVoice || !showRemoteVideo || controlsVisible) && !isMinimized && !systemPip;
+  const audioOnlyMode = isVoice && isCameraOff && !showRemoteVideo;
+
+  const topSubtitle = isConnected
+    ? formatDuration(callDuration)
+    : callStatus === 'ringing'
+    ? isVoice
+      ? 'Chatter Audio...'
+      : 'Chatter Video...'
+    : callStatus === 'calling'
+    ? 'Calling...'
+    : 'Connecting...';
 
   const containerStyle = isMinimized
     ? [
@@ -383,14 +390,27 @@ export const ActiveCallView = () => {
     <Animated.View style={containerStyle} pointerEvents="box-none">
       {!isMinimized && !systemPip && <StatusBar style="light" />}
 
-      {/* Layer 0: Hardware-accelerated OS WebView WebRTC Engine */}
+      {/* Layer 0: Full-Screen Profile Image Backdrop (shown on audio calls & before video starts) */}
+      {!isMinimized && !systemPip && (
+        <CallFullScreenBackdrop
+          avatarUri={participantAvatar}
+          name={participantName}
+          subtitle={topSubtitle}
+          showPhoto={showFullScreenPhoto}
+          mutedBadge={isConnected && remoteAudioMuted}
+          headerOpacity={controlsOpacity}
+        />
+      )}
+
+      {/* Layer 1: Hardware-accelerated WebView WebRTC Engine (transparent where video is off) */}
       {Platform.OS !== 'web' && (
         <View
           style={[
             styles.webviewWrapper,
-            isMinimized && { borderRadius: isVoice ? 34 : 18, overflow: 'hidden' },
+            audioOnlyMode && !isMinimized && styles.hiddenAudioWebView,
+            isMinimized && { borderRadius: isVoice ? 34 : 18, overflow: 'hidden', backgroundColor: '#0b141a' },
           ]}
-          pointerEvents={isMinimized ? 'none' : 'auto'}
+          pointerEvents={isMinimized || audioOnlyMode ? 'none' : 'auto'}
         >
           <WebView<{}>
             ref={webViewRef}
@@ -421,12 +441,8 @@ export const ActiveCallView = () => {
 
       {/* MINIMIZED IN-APP FLOATING PIP OVERLAY */}
       {isMinimized ? (
-        <View
-          style={styles.pipTouchLayer}
-          {...panResponder.panHandlers}
-        >
+        <View style={styles.pipTouchLayer} {...panResponder.panHandlers}>
           {isVoice ? (
-            /* Minimized Floating Voice Call Chip */
             <View style={styles.voicePipCard}>
               <Avatar uri={participantAvatar} size={42} />
               <View style={styles.voicePipInfo}>
@@ -449,7 +465,6 @@ export const ActiveCallView = () => {
               </TouchableOpacity>
             </View>
           ) : (
-            /* Minimized Floating Video Call Window */
             <View style={styles.videoPipOverlay}>
               {!showRemoteVideo && (
                 <View style={styles.videoPipAvatarBg}>
@@ -470,190 +485,183 @@ export const ActiveCallView = () => {
           )}
         </View>
       ) : systemPip ? null : (
-        /* FULLSCREEN WHATSAPP-STYLE CALL INTERFACE */
+        /* FULLSCREEN REFERENCE-INSPIRED CALL OVERLAY */
         <>
-          {/* Center Voice Mode UI or Remote Camera-Off Avatar */}
-          <View style={styles.centerArea} pointerEvents="box-none">
-            {isVoice ? (
-              <View style={styles.voiceMode} pointerEvents="none">
-                <View style={styles.pulseContainer}>
-                  {isConnected && (
-                    <>
-                      <View style={styles.voicePulseOuter} />
-                      <View style={styles.voicePulseInner} />
-                    </>
-                  )}
-                  <Avatar
-                    uri={participantAvatar}
-                    size={136}
-                    imageStyle={{ borderWidth: 3, borderColor: 'rgba(0, 168, 132, 0.45)' }}
-                  />
-                </View>
-
-                <Text style={styles.voiceName}>{participantName}</Text>
-                <Text style={styles.voiceTimer}>
-                  {isConnected
-                    ? formatDuration(callDuration)
-                    : callStatus === 'ringing'
-                    ? 'Calling...'
-                    : 'Connecting...'}
-                </Text>
-
-                <View style={styles.audioRoutePill}>
-                  {isSpeakerOn ? (
-                    <Volume2 size={14} color="#00a884" />
-                  ) : (
-                    <Volume1 size={14} color="#8696a0" />
-                  )}
-                  <Text style={styles.audioRouteText}>
-                    {remoteAudioMuted
-                      ? 'Participant muted'
-                      : isSpeakerOn
-                      ? 'Speaker on'
-                      : 'Earpiece • Hold near ear'}
-                  </Text>
-                </View>
-              </View>
-            ) : showMainPlaceholder ? (
-              <TouchableOpacity
-                activeOpacity={1}
-                onPress={() => setControlsVisible(!controlsVisible)}
-                style={styles.remoteVideoPlaceholder}
-              >
-                <Avatar
-                  uri={participantAvatar}
-                  size={108}
-                  imageStyle={{ borderWidth: 2, borderColor: 'rgba(255,255,255,0.22)' }}
-                />
-                <Text style={styles.remoteName}>{participantName}</Text>
-                <Text style={styles.remoteStatus}>
-                  {isConnected
-                    ? remoteVideoMuted
-                      ? 'Camera is off'
-                      : 'Connected'
-                    : callStatus === 'ringing'
-                    ? 'Calling...'
-                    : 'Connecting video...'}
-                </Text>
-              </TouchableOpacity>
-            ) : null}
-          </View>
-
-          {/* Top WhatsApp Header Bar (Auto-hides on tap in Video calls) */}
+          {/* Minimal Top Corner Utilities */}
           <Animated.View
-            style={[styles.headerOverlay, { opacity: controlsOpacity }]}
+            style={[styles.topCornerRow, { opacity: controlsOpacity }]}
             pointerEvents={showControls ? 'box-none' : 'none'}
           >
             <TouchableOpacity
               onPress={() => setMinimized(true)}
-              style={styles.headerCircleBtn}
+              style={styles.cornerCircleBtn}
               activeOpacity={0.8}
             >
-              <ChevronDown size={22} color="#e9edef" />
+              <ChevronDown size={20} color="#ffffff" />
             </TouchableOpacity>
 
-            <View style={styles.headerCenter} pointerEvents="none">
-              <Text style={styles.headerName} numberOfLines={1}>
-                {participantName}
-              </Text>
-              <View style={styles.headerSubRow}>
-                {!isConnected ? (
-                  <>
-                    <Lock size={11} color="#8696a0" />
-                    <Text style={styles.headerSubtitle}>
-                      {callStatus === 'ringing' ? 'Ringing...' : 'Connecting...'}
-                    </Text>
-                  </>
-                ) : (
-                  <Text style={styles.headerTimer}>{formatDuration(callDuration)}</Text>
-                )}
-                {isConnected && remoteAudioMuted && (
-                  <View style={styles.remoteMutePill}>
-                    <MicOff size={10} color="#fca5a5" />
-                    <Text style={styles.remoteMuteText}>Muted</Text>
-                  </View>
-                )}
-              </View>
-            </View>
-
-            {!isVoice ? (
+            {!isVoice && !isCameraOff ? (
               <TouchableOpacity
-                onPress={toggleSwap}
-                style={[styles.headerCircleBtn, isSwapped && styles.headerCircleBtnActive]}
+                onPress={switchCamera}
+                style={styles.cornerCircleBtn}
                 activeOpacity={0.8}
               >
-                <ArrowLeftRight size={18} color={isSwapped ? '#0b141a' : '#e9edef'} />
+                <SwitchCamera size={19} color="#ffffff" />
               </TouchableOpacity>
             ) : (
-              <View style={styles.headerSpacer} />
+              <View style={styles.cornerSpacer} />
             )}
           </Animated.View>
 
-          {/* Bottom Ergonomic WhatsApp Control Dock */}
+          {/* Bottom Controls: 4-Button Pill for Video Calls, 3x2 Dark Box for Voice Calls */}
           <Animated.View
-            style={[styles.bottomDockWrapper, { opacity: controlsOpacity }]}
+            style={[styles.bottomGridWrapper, { opacity: controlsOpacity }]}
             pointerEvents={showControls ? 'box-none' : 'none'}
           >
-            <View style={styles.bottomDock}>
-              {/* Speaker / Earpiece Toggle */}
-              <TouchableOpacity
-                onPress={toggleSpeaker}
-                style={[styles.dockBtn, isSpeakerOn && styles.dockBtnActiveWhite]}
-                activeOpacity={0.8}
-              >
-                {isSpeakerOn ? (
-                  <Volume2 size={22} color="#0b141a" />
-                ) : (
-                  <Volume1 size={22} color="#e9edef" />
-                )}
-              </TouchableOpacity>
+            {isVoice ? (
+              <View style={styles.controlsBox}>
+                <View style={styles.gridRow}>
+                  {/* 1. Speaker */}
+                  <View style={styles.gridItem}>
+                    <TouchableOpacity
+                      onPress={toggleSpeaker}
+                      style={[styles.gridCircleBtn, isSpeakerOn && styles.gridCircleActive]}
+                      activeOpacity={0.8}
+                    >
+                      {isSpeakerOn ? (
+                        <Volume2 size={26} color="#111827" />
+                      ) : (
+                        <Volume1 size={26} color="#ffffff" />
+                      )}
+                    </TouchableOpacity>
+                    <Text style={styles.gridLabel}>Speaker</Text>
+                  </View>
 
-              {/* Camera On/Off (or Upgrade Voice -> Video) */}
-              <TouchableOpacity
-                onPress={toggleCamera}
-                style={[styles.dockBtn, isCameraOff && styles.dockBtnMuted]}
-                activeOpacity={0.8}
-              >
-                {isCameraOff ? (
-                  <VideoOff size={22} color="#fca5a5" />
-                ) : (
-                  <Video size={22} color="#e9edef" />
-                )}
-              </TouchableOpacity>
+                  {/* 2. Video Toggle / Upgrade */}
+                  <View style={styles.gridItem}>
+                    <TouchableOpacity
+                      onPress={toggleCamera}
+                      style={[styles.gridCircleBtn, !isCameraOff && styles.gridCircleActive]}
+                      activeOpacity={0.8}
+                    >
+                      {isCameraOff ? (
+                        <VideoOff size={25} color="#ffffff" />
+                      ) : (
+                        <Video size={25} color="#111827" />
+                      )}
+                    </TouchableOpacity>
+                    <Text style={styles.gridLabel}>Video</Text>
+                  </View>
 
-              {/* Flip Front/Back Camera */}
-              {!isCameraOff && (
+                  {/* 3. Mute */}
+                  <View style={styles.gridItem}>
+                    <TouchableOpacity
+                      onPress={toggleMic}
+                      style={[styles.gridCircleBtn, isMicMuted && styles.gridCircleActive]}
+                      activeOpacity={0.8}
+                    >
+                      {isMicMuted ? (
+                        <MicOff size={25} color="#111827" />
+                      ) : (
+                        <Mic size={25} color="#ffffff" />
+                      )}
+                    </TouchableOpacity>
+                    <Text style={styles.gridLabel}>Mute</Text>
+                  </View>
+                </View>
+
+                <View style={styles.gridRow}>
+                  {/* 4. Minimize to Chat (In-App Floating PiP) */}
+                  <View style={styles.gridItem}>
+                    <TouchableOpacity
+                      onPress={() => setMinimized(true)}
+                      style={styles.gridCircleBtn}
+                      activeOpacity={0.8}
+                    >
+                      <MessageSquare size={24} color="#ffffff" />
+                    </TouchableOpacity>
+                    <Text style={styles.gridLabel}>Chat</Text>
+                  </View>
+
+                  {/* 5. Center Red End Call */}
+                  <View style={styles.gridItem}>
+                    <TouchableOpacity
+                      onPress={() => leaveCall(true)}
+                      style={[styles.gridCircleBtn, styles.endCircleBtn]}
+                      activeOpacity={0.85}
+                    >
+                      <PhoneOff size={26} color="#ffffff" />
+                    </TouchableOpacity>
+                    <Text style={styles.gridLabel}>End</Text>
+                  </View>
+
+                  {/* 6. Flip Camera (enabled when camera active) */}
+                  <View style={styles.gridItem}>
+                    <TouchableOpacity
+                      onPress={switchCamera}
+                      disabled={isCameraOff}
+                      style={[styles.gridCircleBtn, isCameraOff && styles.gridCircleDisabled]}
+                      activeOpacity={0.8}
+                    >
+                      <SwitchCamera
+                        size={24}
+                        color={isCameraOff ? 'rgba(255,255,255,0.4)' : '#ffffff'}
+                      />
+                    </TouchableOpacity>
+                    <Text style={[styles.gridLabel, isCameraOff && styles.gridLabelDisabled]}>
+                      Flip
+                    </Text>
+                  </View>
+                </View>
+              </View>
+            ) : (
+              /* Clean 4-Button Video Call Pill */
+              <View style={styles.videoPillDock}>
                 <TouchableOpacity
-                  onPress={switchCamera}
-                  style={styles.dockBtn}
+                  onPress={toggleCamera}
+                  style={[styles.pillCircleBtn, isCameraOff && styles.pillCircleActive]}
                   activeOpacity={0.8}
                 >
-                  <SwitchCamera size={22} color="#e9edef" />
+                  {isCameraOff ? (
+                    <VideoOff size={25} color="#111827" />
+                  ) : (
+                    <Video size={25} color="#ffffff" />
+                  )}
                 </TouchableOpacity>
-              )}
 
-              {/* Mic Mute Toggle */}
-              <TouchableOpacity
-                onPress={toggleMic}
-                style={[styles.dockBtn, isMicMuted && styles.dockBtnMuted]}
-                activeOpacity={0.8}
-              >
-                {isMicMuted ? (
-                  <MicOff size={22} color="#fca5a5" />
-                ) : (
-                  <Mic size={22} color="#e9edef" />
-                )}
-              </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={toggleSpeaker}
+                  style={[styles.pillCircleBtn, isSpeakerOn && styles.pillCircleActive]}
+                  activeOpacity={0.8}
+                >
+                  {isSpeakerOn ? (
+                    <Volume2 size={25} color="#111827" />
+                  ) : (
+                    <Volume1 size={25} color="#ffffff" />
+                  )}
+                </TouchableOpacity>
 
-              {/* End Call */}
-              <TouchableOpacity
-                onPress={() => leaveCall(true)}
-                style={styles.endCallBtn}
-                activeOpacity={0.85}
-              >
-                <PhoneOff size={24} color="#ffffff" />
-              </TouchableOpacity>
-            </View>
+                <TouchableOpacity
+                  onPress={toggleMic}
+                  style={[styles.pillCircleBtn, isMicMuted && styles.pillCircleActive]}
+                  activeOpacity={0.8}
+                >
+                  {isMicMuted ? (
+                    <MicOff size={25} color="#111827" />
+                  ) : (
+                    <Mic size={25} color="#ffffff" />
+                  )}
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={() => leaveCall(true)}
+                  style={[styles.pillCircleBtn, styles.pillEndBtn]}
+                  activeOpacity={0.85}
+                >
+                  <PhoneOff size={25} color="#ffffff" />
+                </TouchableOpacity>
+              </View>
+            )}
           </Animated.View>
         </>
       )}
@@ -669,7 +677,7 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     zIndex: 999,
-    backgroundColor: '#0b141a',
+    backgroundColor: '#111827',
   },
   minimizedContainer: {
     position: 'absolute',
@@ -692,11 +700,15 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: '#0b141a',
+    backgroundColor: 'transparent',
+    zIndex: 4,
+  },
+  hiddenAudioWebView: {
+    opacity: 0,
   },
   webview: {
     flex: 1,
-    backgroundColor: '#0b141a',
+    backgroundColor: 'transparent',
   },
   pipTouchLayer: {
     flex: 1,
@@ -786,196 +798,124 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     fontFamily: 'monospace',
   },
-  headerOverlay: {
+  topCornerRow: {
     position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    zIndex: 20,
-    paddingTop: 48,
-    paddingHorizontal: 16,
-    paddingBottom: 20,
+    top: 48,
+    left: 18,
+    right: 18,
+    zIndex: 25,
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: 'rgba(11, 20, 26, 0.55)',
+    alignItems: 'center',
   },
-  headerCircleBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+  cornerCircleBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: 'rgba(255, 255, 255, 0.16)',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  headerCircleBtnActive: {
-    backgroundColor: '#e9edef',
+  cornerCircleActive: {
+    backgroundColor: '#ffffff',
   },
-  headerSpacer: {
-    width: 40,
-    height: 40,
+  cornerSpacer: {
+    width: 38,
+    height: 38,
   },
-  headerCenter: {
-    flex: 1,
-    alignItems: 'center',
-    paddingHorizontal: 12,
-  },
-  headerName: {
-    color: '#e9edef',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  headerSubRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    marginTop: 3,
-  },
-  headerSubtitle: {
-    color: '#8696a0',
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  headerTimer: {
-    color: '#e9edef',
-    fontSize: 13,
-    fontWeight: '600',
-    fontFamily: 'monospace',
-  },
-  remoteMutePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-    backgroundColor: 'rgba(239, 68, 68, 0.25)',
-    marginLeft: 4,
-  },
-  remoteMuteText: {
-    color: '#fca5a5',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  centerArea: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 5,
-  },
-  voiceMode: {
-    alignItems: 'center',
-    gap: 12,
-    paddingBottom: 40,
-  },
-  pulseContainer: {
-    width: 190,
-    height: 190,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  voicePulseOuter: {
-    position: 'absolute',
-    width: 190,
-    height: 190,
-    borderRadius: 95,
-    backgroundColor: 'rgba(0, 168, 132, 0.1)',
-  },
-  voicePulseInner: {
-    position: 'absolute',
-    width: 162,
-    height: 162,
-    borderRadius: 81,
-    backgroundColor: 'rgba(0, 168, 132, 0.18)',
-  },
-  voiceName: {
-    color: '#e9edef',
-    fontSize: 28,
-    fontWeight: '700',
-  },
-  voiceTimer: {
-    color: '#8696a0',
-    fontSize: 17,
-    fontFamily: 'monospace',
-    fontWeight: '600',
-  },
-  audioRoutePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginTop: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-  },
-  audioRouteText: {
-    color: '#d1d7db',
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  remoteVideoPlaceholder: {
-    alignItems: 'center',
-    gap: 10,
-    padding: 20,
-  },
-  remoteName: {
-    color: '#e9edef',
-    fontSize: 22,
-    fontWeight: '600',
-  },
-  remoteStatus: {
-    color: '#8696a0',
-    fontSize: 14,
-  },
-  bottomDockWrapper: {
+  bottomGridWrapper: {
     position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
-    paddingBottom: 34,
-    paddingHorizontal: 16,
+    zIndex: 25,
+    paddingBottom: 32,
+    paddingHorizontal: 10,
     alignItems: 'center',
-    zIndex: 20,
   },
-  bottomDock: {
+  controlsBox: {
+    width: '100%',
+    maxWidth: 348,
+    borderRadius: 32,
+    backgroundColor: 'rgba(10, 14, 20, 0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    paddingHorizontal: 14,
+    paddingVertical: 20,
+    gap: 18,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.35,
+    shadowRadius: 16,
+    elevation: 16,
+  },
+  gridRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    width: '100%',
+  },
+  gridItem: {
+    alignItems: 'center',
+    width: 82,
+    gap: 7,
+  },
+  gridCircleBtn: {
+    width: 66,
+    height: 66,
+    borderRadius: 33,
+    backgroundColor: 'rgba(255, 255, 255, 0.22)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  gridCircleActive: {
+    backgroundColor: '#ffffff',
+  },
+  gridCircleDisabled: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  endCircleBtn: {
+    backgroundColor: '#ff3b30',
+  },
+  gridLabel: {
+    color: '#ffffff',
+    fontSize: 12.5,
+    fontWeight: '500',
+    textAlign: 'center',
+    textShadowColor: 'rgba(0, 0, 0, 0.45)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  gridLabelDisabled: {
+    color: 'rgba(255, 255, 255, 0.45)',
+  },
+  videoPillDock: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-evenly',
-    width: '100%',
-    maxWidth: 400,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    borderRadius: 28,
-    backgroundColor: 'rgba(31, 44, 52, 0.94)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.09)',
-    elevation: 20,
+    backgroundColor: '#161618',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 18,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.45,
+    shadowRadius: 18,
+    elevation: 18,
   },
-  dockBtn: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#2a3942',
+  pillCircleBtn: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: '#3f3f46',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  dockBtnActiveWhite: {
-    backgroundColor: '#e9edef',
+  pillCircleActive: {
+    backgroundColor: '#ffffff',
   },
-  dockBtnMuted: {
-    backgroundColor: 'rgba(239, 68, 68, 0.25)',
-    borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.45)',
-  },
-  endCallBtn: {
-    width: 56,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#ef4444',
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 8,
+  pillEndBtn: {
+    backgroundColor: '#ef1c43',
   },
 });

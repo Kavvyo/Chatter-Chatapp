@@ -20,6 +20,7 @@ import { ChatHeader } from '../../components/chat/ChatHeader';
 import { MessageBubble } from '../../components/chat/MessageBubble';
 import { MessageInput } from '../../components/chat/MessageInput';
 import { TypingIndicator } from '../../components/chat/TypingIndicator';
+import Avatar from '../../components/ui/Avatar';
 
 export default function ChatConversationScreen() {
   const { id, unreadCount: paramUnreadCount } = useLocalSearchParams<{ id: string; unreadCount?: string }>();
@@ -210,8 +211,18 @@ export default function ChatConversationScreen() {
         ) : reversedMessages.length === 0 ? (
           <View style={styles.emptyWrapper}>
             <View style={styles.emptyContainer}>
+              <Avatar
+                uri={selectedUser?.profilePic}
+                size={68}
+                showOnline={false}
+              />
+              <Text style={[styles.emptyTitle, { color: theme.baseContent }]}>
+                {selectedUser ? selectedUser.fullName : 'Start chatting'}
+              </Text>
               <Text style={[styles.emptyText, { color: theme.baseContentMuted }]}>
-                No messages yet. Send a wave or say hello!
+                {selectedUser
+                  ? `Say hello to ${selectedUser.fullName.split(' ')[0]}`
+                  : 'Send a message to start the conversation.'}
               </Text>
             </View>
             <TypingIndicator visible={isTyping} avatarUri={selectedUser?.profilePic} />
@@ -324,6 +335,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 32,
+    gap: 10,
+  },
+  emptyTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    letterSpacing: -0.3,
+    marginTop: 4,
   },
   emptyText: {
     fontSize: 14,

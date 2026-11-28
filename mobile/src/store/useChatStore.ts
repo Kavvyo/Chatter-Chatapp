@@ -5,11 +5,21 @@ import {
   getCachedMessages,
   getCachedUnreadCounts,
   getCachedUsers,
+  getPendingStickerOutbox,
   prefetchImageUrls,
   setCachedMessages,
   setCachedUnreadCounts,
   setCachedUsers,
+  setPendingStickerOutbox,
+  type PendingStickerOutboxItem,
 } from '../lib/cache';
+import {
+  readStickerBase64,
+  resolveLocalStickerUri,
+  saveReceivedSticker,
+  type StickerItem,
+} from '../lib/stickers';
+import { useStickerStore } from './useStickerStore';
 
 export interface Message {
   _id: string;
@@ -19,6 +29,12 @@ export interface Message {
   receiverId: string;
   text?: string;
   image?: string;
+  isSticker?: boolean;
+  stickerHash?: string;
+  stickerUri?: string;
+  isAnimated?: boolean;
+  stickerStatus?: 'uploading' | 'queued' | 'downloading' | 'sent';
+  localOnly?: boolean;
   read: boolean;
   createdAt: string;
 }
@@ -33,10 +49,14 @@ export interface ChatUser {
 
 const INITIAL_PAGE_LIMIT = 50;
 
-function pruneMessagesBefore(list: Message[], clearedAtIso?: string | null): Message[] {
+function pruneMessagesBefore(
+  list: Message[],
+  clearedAtIso?: string | null,
+  preserveLocalOnly = false
+): Message[] {
   if (list.length === 0) return list;
   if (!clearedAtIso) {
-    return list.filter((m) => m._id.startsWith('temp_'));
+    return list.filter((m) => m._id.startsWith('temp_') || (preserveLocalOnly && m.localOnly));
   }
 
   const cutoffMs = new Date(clearedAtIso).getTime();
@@ -44,6 +64,7 @@ function pruneMessagesBefore(list: Message[], clearedAtIso?: string | null): Mes
 
   return list.filter((m) => {
     if (m._id.startsWith('temp_')) return true;
+    if (preserveLocalOnly && m.localOnly) return true;
     return new Date(m.createdAt).getTime() > cutoffMs;
   });
 }
@@ -123,7 +144,7 @@ function mergeMessagesById(existing: Message[], incoming: Message[]): Message[] 
 }
 
 function getDeltaCursor(cached: Message[], myUserId?: string): string | null {
-  const confirmed = cached.filter((m) => !m._id.startsWith('temp_'));
+  const confirmed = cached.filter((m) => !m._id.startsWith('temp_') && !m.localOnly);
   if (confirmed.length === 0) return null;
 
   // Include recent unread sent messages in delta window so read receipts catch up too
@@ -150,6 +171,103 @@ function rememberReadIds(ids: string[]) {
   }
 }
 
+const sentStickerHashesByPeer = new Map<string, Set<string>>();
+function markStickerHashKnownByPeer(peerId: string, stickerHash: string) {
+  let set = sentStickerHashesByPeer.get(peerId);
+  if (!set) {
+    set = new Set<string>();
+    sentStickerHashesByPeer.set(peerId, set);
+  }
+  set.add(stickerHash);
+}
+
+let isFlushingStickerOutbox = false;
+
+async function emitStickerOverSocket(params: {
+  peerId: string;
+  messageId: string;
+  stickerHash: string;
+  isAnimated?: boolean;
+  createdAt: string;
+  dataBase64?: string | null;
+}): Promise<{ delivered: boolean; error?: string }> {
+  const socket = useAuthStore.getState().socket;
+  if (!socket?.connected) {
+    return { delivered: false };
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve({ delivered: false });
+      }
+    }, 3500);
+
+    socket.emit(
+      'sendSticker',
+      {
+        to: params.peerId,
+        messageId: params.messageId,
+        stickerHash: params.stickerHash,
+        isAnimated: Boolean(params.isAnimated),
+        width: 512,
+        height: 512,
+        ...(params.dataBase64 ? { dataBase64: params.dataBase64 } : {}),
+        createdAt: params.createdAt,
+      },
+      (ack?: { ok?: boolean; delivered?: boolean; message?: string }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (ack?.ok === false) {
+          resolve({ delivered: false, error: ack.message });
+        } else {
+          resolve({ delivered: Boolean(ack?.delivered) });
+        }
+      }
+    );
+  });
+}
+
+async function queueStickerOutboxItem(userId: string, item: PendingStickerOutboxItem) {
+  const existing = await getPendingStickerOutbox(userId);
+  if (existing.some((x) => x.messageId === item.messageId)) return;
+  await setPendingStickerOutbox(userId, [...existing, item]);
+}
+
+async function patchPeerMessages(
+  peerId: string,
+  predicate: (m: Message) => boolean,
+  updater: (m: Message) => Message,
+  get: () => ChatState,
+  set: (fn: (state: ChatState) => Partial<ChatState>) => void
+) {
+  const myId = useAuthStore.getState().authUser?._id;
+  let existing = get().messagesByUser[peerId];
+  if ((!existing || existing.length === 0) && myId) {
+    existing = (await getCachedMessages<Message>(myId, peerId)) || [];
+  }
+  if (!existing || existing.length === 0) return;
+
+  let changed = false;
+  const next = existing.map((m) => {
+    if (!predicate(m)) return m;
+    changed = true;
+    return updater(m);
+  });
+  if (!changed) return;
+
+  if (myId) {
+    setCachedMessages(myId, peerId, next);
+  }
+  set((state) => ({
+    messagesByUser: { ...state.messagesByUser, [peerId]: next },
+    messages: state.selectedUser?._id === peerId ? next : state.messages,
+  }));
+}
+
 interface ChatState {
   messages: Message[];
   messagesByUser: Record<string, Message[]>;
@@ -167,6 +285,8 @@ interface ChatState {
   getMessages: (userId: string, forceFull?: boolean) => Promise<void>;
   loadOlderMessages: (userId: string) => Promise<void>;
   sendMessage: (messageData: { text?: string; image?: string }) => Promise<{ success: boolean; message?: string }>;
+  sendSticker: (sticker: StickerItem) => Promise<{ success: boolean; message?: string }>;
+  flushPendingStickers: () => Promise<void>;
   subscribeToMessages: () => void;
   unSubscribeFromMessages: () => void;
   setSelectedUser: (user: ChatUser | null) => void;
@@ -277,10 +397,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         const latestList = get().messagesByUser[peerId] || cached;
         let prunedBase = latestList;
-        if (serverCount === 0) {
-          prunedBase = pruneMessagesBefore(latestList, null);
-        } else if (clearedAt) {
-          prunedBase = pruneMessagesBefore(latestList, clearedAt);
+        if (clearedAt) {
+          prunedBase = pruneMessagesBefore(latestList, clearedAt, false);
+        } else if (serverCount === 0) {
+          // Only prune server-synced items; preserve already-downloaded P2P local stickers
+          prunedBase = pruneMessagesBefore(latestList, null, true);
         }
 
         const wasPruned = prunedBase.length !== latestList.length;
@@ -515,11 +636,227 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  sendSticker: async (sticker: StickerItem) => {
+    const { selectedUser } = get();
+    if (!selectedUser) return { success: false, message: 'No recipient selected' };
+
+    const peerId = selectedUser._id;
+    const { authUser, socket } = useAuthStore.getState();
+    const myId = authUser?._id;
+    if (!myId) return { success: false, message: 'Not authenticated' };
+
+    const now = Date.now();
+    const messageId = `stk_${now}_${Math.random().toString(36).substring(2, 7)}`;
+    const createdAt = new Date(now).toISOString();
+    // Avoid synchronous file.exists bridges on tap when the pack item already has a file URI.
+    const localUri =
+      sticker.uri || resolveLocalStickerUri(sticker.stickerHash, sticker.uri) || '';
+
+    const localStickerMsg: Message = {
+      _id: messageId,
+      localId: messageId,
+      clientCreatedAt: now,
+      senderId: myId,
+      receiverId: peerId,
+      isSticker: true,
+      stickerHash: sticker.stickerHash,
+      stickerUri: localUri,
+      isAnimated: sticker.isAnimated,
+      stickerStatus: 'uploading',
+      localOnly: true,
+      read: false,
+      createdAt,
+    };
+
+    let updatedMessages: Message[] = [];
+    let nextUnreadSnapshot: Record<string, number> = {};
+
+    set((state) => {
+      const currentList = state.messagesByUser[peerId] || state.messages;
+      updatedMessages = [...currentList, localStickerMsg];
+      nextUnreadSnapshot = { ...state.unreadCounts, [peerId]: 0 };
+
+      return {
+        messages: state.selectedUser?._id === peerId ? updatedMessages : state.messages,
+        messagesByUser: { ...state.messagesByUser, [peerId]: updatedMessages },
+        unreadCounts: nextUnreadSnapshot,
+      };
+    });
+
+    // Yield two animation frames so the message bubble pops in cleanly with the upload ring before disk I/O.
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+
+    setCachedMessages(
+      myId,
+      peerId,
+      updatedMessages.map((m) =>
+        m._id === messageId
+          ? { ...m, stickerStatus: socket?.connected ? 'sent' : 'queued' }
+          : m
+      )
+    );
+    setCachedUnreadCounts(myId, nextUnreadSnapshot);
+    useStickerStore.getState().recordRecentSticker(sticker).catch(() => {});
+
+    const resolvedUri =
+      resolveLocalStickerUri(sticker.stickerHash, localUri) || localUri;
+    const peerAlreadyHasHash = sentStickerHashesByPeer.get(peerId)?.has(sticker.stickerHash);
+    const dataBase64 = peerAlreadyHasHash
+      ? null
+      : await readStickerBase64(sticker.stickerHash, resolvedUri);
+
+    if (!peerAlreadyHasHash && !dataBase64) {
+      await patchPeerMessages(
+        peerId,
+        (m) => m._id === messageId,
+        (m) => ({ ...m, stickerStatus: 'queued' }),
+        get,
+        set
+      );
+      return { success: false, message: 'Sticker file missing from device storage' };
+    }
+
+    if (socket?.connected) {
+      const result = await emitStickerOverSocket({
+        peerId,
+        messageId,
+        stickerHash: sticker.stickerHash,
+        isAnimated: sticker.isAnimated,
+        createdAt,
+        dataBase64,
+      });
+
+      if (result.error) {
+        await patchPeerMessages(
+          peerId,
+          (m) => m._id === messageId,
+          (m) => ({ ...m, stickerStatus: 'queued' }),
+          get,
+          set
+        );
+        return { success: false, message: result.error };
+      }
+
+      if (result.delivered) {
+        markStickerHashKnownByPeer(peerId, sticker.stickerHash);
+        const remainingMs = Math.max(0, 340 - (Date.now() - now));
+        if (remainingMs > 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, remainingMs));
+        }
+        await patchPeerMessages(
+          peerId,
+          (m) => m._id === messageId,
+          (m) => ({ ...m, stickerStatus: 'sent' }),
+          get,
+          set
+        );
+        return { success: true };
+      }
+    }
+
+    // Recipient offline: hold locally in P2P outbox and send directly once they come online
+    await patchPeerMessages(
+      peerId,
+      (m) => m._id === messageId,
+      (m) => ({ ...m, stickerStatus: 'queued' }),
+      get,
+      set
+    );
+    await queueStickerOutboxItem(myId, {
+      messageId,
+      peerId,
+      stickerHash: sticker.stickerHash,
+      stickerUri: resolvedUri,
+      isAnimated: sticker.isAnimated,
+      createdAt,
+    });
+    return { success: true };
+  },
+
+  flushPendingStickers: async () => {
+    if (isFlushingStickerOutbox) return;
+    const { authUser, socket, onlineUsers } = useAuthStore.getState();
+    const myId = authUser?._id;
+    if (!myId || !socket?.connected || onlineUsers.length === 0) return;
+
+    isFlushingStickerOutbox = true;
+    try {
+      const outbox = await getPendingStickerOutbox(myId);
+      if (outbox.length === 0) return;
+
+      const onlineSet = new Set(onlineUsers.map((id) => id.toString()));
+      const remaining: PendingStickerOutboxItem[] = [];
+
+      for (const item of outbox) {
+        if (!onlineSet.has(item.peerId.toString())) {
+          remaining.push(item);
+          continue;
+        }
+
+        const dataBase64 = await readStickerBase64(item.stickerHash, item.stickerUri);
+        if (!dataBase64) {
+          continue;
+        }
+
+        const startedAt = Date.now();
+        await patchPeerMessages(
+          item.peerId,
+          (m) => m._id === item.messageId,
+          (m) => ({ ...m, stickerStatus: 'uploading' }),
+          get,
+          set
+        );
+
+        const res = await emitStickerOverSocket({
+          peerId: item.peerId,
+          messageId: item.messageId,
+          stickerHash: item.stickerHash,
+          isAnimated: item.isAnimated,
+          createdAt: item.createdAt,
+          dataBase64,
+        });
+
+        if (res.delivered) {
+          markStickerHashKnownByPeer(item.peerId, item.stickerHash);
+          const minSpin = Math.max(0, 320 - (Date.now() - startedAt));
+          if (minSpin > 0) await new Promise<void>((r) => setTimeout(r, minSpin));
+          await patchPeerMessages(
+            item.peerId,
+            (m) => m._id === item.messageId,
+            (m) => ({ ...m, stickerStatus: 'sent' }),
+            get,
+            set
+          );
+        } else if (!res.error) {
+          await patchPeerMessages(
+            item.peerId,
+            (m) => m._id === item.messageId,
+            (m) => ({ ...m, stickerStatus: 'queued' }),
+            get,
+            set
+          );
+          remaining.push(item);
+        }
+      }
+
+      if (remaining.length !== outbox.length) {
+        await setPendingStickerOutbox(myId, remaining);
+      }
+    } finally {
+      isFlushingStickerOutbox = false;
+    }
+  },
+
   subscribeToMessages: () => {
     const socket = useAuthStore.getState().socket;
     if (!socket) return;
 
     socket.off('newMessage');
+    socket.off('newSticker');
+    socket.off('stickerRequested');
+    socket.off('stickerDelivered');
     socket.off('messageRead');
     socket.off('conversationCleared');
     socket.off('typing');
@@ -667,12 +1004,196 @@ export const useChatStore = create<ChatState>((set, get) => ({
         await applyConversationClear(peerId.toString(), clearedAt, get, set, true);
       }
     );
+
+    socket.on(
+      'newSticker',
+      async (
+        incoming: Message & { dataBase64?: string; stickerHash: string }
+      ) => {
+        const myId = useAuthStore.getState().authUser?._id;
+        const senderId = incoming.senderId?.toString();
+        const receiverId = incoming.receiverId?.toString() || '';
+        const isFromMe = Boolean(myId && senderId === myId.toString());
+        const peerId = isFromMe ? receiverId : senderId;
+        if (!peerId || !incoming.stickerHash) return;
+
+        const existingLocalUri = resolveLocalStickerUri(incoming.stickerHash);
+        const alreadyOnDevice = Boolean(existingLocalUri);
+        const isRetryPayload = incoming._id?.startsWith('stk_retry_');
+        const receivedAt = Date.now();
+
+        const { dataBase64, ...rest } = incoming;
+
+        let existingList = get().messagesByUser[peerId];
+        if ((!existingList || existingList.length === 0) && myId) {
+          existingList = (await getCachedMessages<Message>(myId, peerId)) || [];
+        }
+        const baseList = existingList || [];
+
+        const initialMsg: Message = {
+          ...rest,
+          isSticker: true,
+          stickerHash: incoming.stickerHash,
+          ...(existingLocalUri ? { stickerUri: existingLocalUri } : {}),
+          stickerStatus: alreadyOnDevice ? 'sent' : 'downloading',
+          localOnly: true,
+          clientCreatedAt: receivedAt,
+        };
+
+        let updatedList: Message[];
+        const waitingMatchIdx = isRetryPayload
+          ? baseList.findIndex(
+              (m) => m.stickerHash === incoming.stickerHash && !m.stickerUri
+            )
+          : baseList.findIndex((m) => m._id === incoming._id);
+
+        if (waitingMatchIdx !== -1) {
+          updatedList = baseList.map((m, idx) =>
+            idx === waitingMatchIdx
+              ? {
+                  ...m,
+                  ...initialMsg,
+                  _id: m._id,
+                  stickerUri: existingLocalUri || m.stickerUri,
+                  localId: m.localId,
+                  clientCreatedAt: m.clientCreatedAt,
+                }
+              : m
+          );
+        } else {
+          updatedList = [...baseList, initialMsg];
+        }
+
+        const { selectedUser, unreadCounts } = get();
+        const isViewing = Boolean(selectedUser && selectedUser._id.toString() === peerId);
+
+        if (isViewing) {
+          set((state) => ({
+            messages: updatedList,
+            messagesByUser: { ...state.messagesByUser, [peerId]: updatedList },
+          }));
+          if (!isFromMe) {
+            socket.emit('stickerDelivered', {
+              to: senderId,
+              messageId: incoming._id,
+              stickerHash: incoming.stickerHash,
+            });
+            get().markMessageAsRead(selectedUser!._id, [incoming._id]);
+          }
+        } else if (!isFromMe) {
+          socket.emit('stickerDelivered', {
+            to: senderId,
+            messageId: incoming._id,
+            stickerHash: incoming.stickerHash,
+          });
+          const nextUnread = {
+            ...unreadCounts,
+            [peerId]: (unreadCounts[peerId] || 0) + 1,
+          };
+          if (myId) setCachedUnreadCounts(myId, nextUnread);
+          set((state) => ({
+            messagesByUser: { ...state.messagesByUser, [peerId]: updatedList },
+            unreadCounts: nextUnread,
+          }));
+        } else {
+          set((state) => ({
+            messagesByUser: { ...state.messagesByUser, [peerId]: updatedList },
+          }));
+        }
+
+        if (alreadyOnDevice) {
+          if (myId) setCachedMessages(myId, peerId, updatedList);
+          return;
+        }
+
+        if (dataBase64) {
+          const savedUri = await saveReceivedSticker(incoming.stickerHash, dataBase64);
+          const minAnimMs = Math.max(0, 360 - (Date.now() - receivedAt));
+          if (minAnimMs > 0) {
+            await new Promise<void>((r) => setTimeout(r, minAnimMs));
+          }
+          await patchPeerMessages(
+            peerId,
+            (m) =>
+              m._id === incoming._id ||
+              (m.stickerHash === incoming.stickerHash && !m.stickerUri),
+            (m) => ({
+              ...m,
+              ...(savedUri ? { stickerUri: savedUri } : {}),
+              stickerStatus: 'sent',
+            }),
+            get,
+            set
+          );
+        } else if (!isFromMe) {
+          if (myId) setCachedMessages(myId, peerId, updatedList);
+          socket.emit('requestSticker', {
+            to: senderId,
+            messageId: incoming._id,
+            stickerHash: incoming.stickerHash,
+          });
+        }
+      }
+    );
+
+    socket.on(
+      'stickerRequested',
+      async ({
+        from,
+        messageId,
+        stickerHash,
+      }: {
+        from: string;
+        messageId?: string;
+        stickerHash: string;
+      }) => {
+        if (!from || !stickerHash) return;
+        const dataBase64 = await readStickerBase64(stickerHash);
+        if (!dataBase64) return;
+
+        await emitStickerOverSocket({
+          peerId: from.toString(),
+          messageId: messageId || `stk_retry_${Date.now()}`,
+          stickerHash,
+          createdAt: new Date().toISOString(),
+          dataBase64,
+        });
+      }
+    );
+
+    socket.on(
+      'stickerDelivered',
+      async ({
+        peerId,
+        messageId,
+        stickerHash,
+      }: {
+        peerId: string;
+        messageId: string;
+        stickerHash?: string;
+      }) => {
+        if (peerId && stickerHash) {
+          markStickerHashKnownByPeer(peerId.toString(), stickerHash);
+        }
+        const myId = useAuthStore.getState().authUser?._id;
+        if (myId && messageId) {
+          const outbox = await getPendingStickerOutbox(myId);
+          const filtered = outbox.filter((x) => x.messageId !== messageId);
+          if (filtered.length !== outbox.length) {
+            await setPendingStickerOutbox(myId, filtered);
+          }
+        }
+      }
+    );
   },
 
   unSubscribeFromMessages: () => {
     const socket = useAuthStore.getState().socket;
     if (!socket) return;
     socket.off('newMessage');
+    socket.off('newSticker');
+    socket.off('stickerRequested');
+    socket.off('stickerDelivered');
     socket.off('messageRead');
     socket.off('conversationCleared');
     socket.off('typing');
@@ -784,11 +1305,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     const socket = useAuthStore.getState().socket;
+    const localStickerIds = existingList
+      .filter(
+        (m) =>
+          m.localOnly &&
+          m.senderId === userId &&
+          !m.read &&
+          (mergedIds.length === 0 || mergedIds.includes(m._id))
+      )
+      .map((m) => m._id);
+
+    const serverUnreadIds = mergedIds.filter((id) => !localStickerIds.includes(id));
+
     if (socket?.connected) {
-      socket.emit('markAsRead', {
-        to: userId,
-        ...(mergedIds.length > 0 ? { messageIds: mergedIds } : {}),
-      });
+      if (localStickerIds.length > 0) {
+        socket.emit('stickerRead', { to: userId, messageIds: localStickerIds });
+      }
+      if (serverUnreadIds.length > 0 || mergedIds.length === 0) {
+        socket.emit('markAsRead', {
+          to: userId,
+          ...(serverUnreadIds.length > 0 ? { messageIds: serverUnreadIds } : {}),
+        });
+      }
       return;
     }
 
@@ -802,6 +1340,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setIsTyping: (isTyping: boolean) => set({ isTyping }),
 
   reset: () => {
+    sentStickerHashesByPeer.clear();
+    recentReadIds.clear();
     set({
       messages: [],
       messagesByUser: {},

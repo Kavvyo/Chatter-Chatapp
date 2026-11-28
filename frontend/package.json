@@ -16,6 +16,7 @@
     "axios": "^1.8.4",
     "chat-app": "file:..",
     "daisyui": "^4.12.24",
+    "fflate": "^0.8.3",
     "livekit-client": "^2.24.1",
     "lodash.debounce": "^4.0.8",
     "lucide-react": "^0.487.0",

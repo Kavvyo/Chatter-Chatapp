@@ -14,28 +14,31 @@ interface ChatHeaderProps {
 
 export const ChatHeader: React.FC<ChatHeaderProps> = ({ onMenuPress }) => {
   const router = useRouter();
-  const { selectedUser } = useChatStore();
+  const { selectedUser, isTyping } = useChatStore();
   const { onlineUsers } = useAuthStore();
   const { callUser } = useCallStore();
   const { theme } = useThemeStore();
 
   const isOnline = Boolean(selectedUser && onlineUsers.includes(selectedUser._id));
+  const surfaceBtnBg = theme.isDark ? 'rgba(255,255,255,0.07)' : theme.base200;
+  const dividerColor = theme.isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)';
 
   return (
-    <View style={[styles.header, { backgroundColor: theme.base100, borderBottomColor: theme.base300 }]}>
+    <View style={[styles.header, { backgroundColor: theme.base100, borderBottomColor: dividerColor }]}>
       <View style={styles.left}>
         <TouchableOpacity
           onPress={() => router.back()}
-          style={styles.backBtn}
-          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          style={[styles.backBtn, { backgroundColor: surfaceBtnBg }]}
+          activeOpacity={0.7}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
-          <ChevronLeft size={26} color={theme.baseContent} />
+          <ChevronLeft size={22} color={theme.baseContent} />
         </TouchableOpacity>
 
         {/* Avatar + Online indicator */}
         <Avatar
           uri={selectedUser?.profilePic}
-          size={42}
+          size={40}
           showOnline={true}
           isOnline={isOnline}
         />
@@ -45,8 +48,25 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({ onMenuPress }) => {
           <Text style={[styles.name, { color: theme.baseContent }]} numberOfLines={1}>
             {selectedUser ? selectedUser.fullName : 'Chat'}
           </Text>
-          <Text style={[styles.status, { color: isOnline ? '#10b981' : theme.baseContentMuted }]}>
-            {selectedUser ? (isOnline ? 'Online' : 'Offline') : 'Connecting...'}
+          <Text
+            style={[
+              styles.status,
+              {
+                color: isTyping
+                  ? theme.primary
+                  : isOnline
+                  ? '#10b981'
+                  : theme.baseContentMuted,
+              },
+            ]}
+          >
+            {isTyping
+              ? 'typing...'
+              : selectedUser
+              ? isOnline
+                ? 'Active now'
+                : 'Offline'
+              : 'Connecting...'}
           </Text>
         </View>
       </View>
@@ -56,7 +76,7 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({ onMenuPress }) => {
         <View style={styles.actions}>
           <TouchableOpacity
             onPress={() => callUser(selectedUser, 'voice')}
-            style={[styles.actionBtn, { backgroundColor: theme.base200 }]}
+            style={[styles.actionBtn, { backgroundColor: surfaceBtnBg }]}
             activeOpacity={0.7}
           >
             <Phone size={18} color={theme.baseContent} />
@@ -64,7 +84,7 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({ onMenuPress }) => {
 
           <TouchableOpacity
             onPress={() => callUser(selectedUser, 'video')}
-            style={[styles.actionBtn, { backgroundColor: theme.base200 }]}
+            style={[styles.actionBtn, { backgroundColor: surfaceBtnBg }]}
             activeOpacity={0.7}
           >
             <Video size={18} color={theme.baseContent} />
@@ -73,7 +93,7 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({ onMenuPress }) => {
           {onMenuPress && (
             <TouchableOpacity
               onPress={onMenuPress}
-              style={[styles.actionBtn, { backgroundColor: theme.base200 }]}
+              style={[styles.actionBtn, { backgroundColor: surfaceBtnBg }]}
               activeOpacity={0.7}
             >
               <EllipsisVertical size={18} color={theme.baseContent} />
@@ -92,7 +112,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 14,
     paddingVertical: 10,
-    borderBottomWidth: 1,
+    borderBottomWidth: 0.5,
   },
   left: {
     flexDirection: 'row',
@@ -101,8 +121,11 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   backBtn: {
-    paddingRight: 2,
-    paddingVertical: 4,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   userInfo: {
     flex: 1,
@@ -110,6 +133,7 @@ const styles = StyleSheet.create({
   name: {
     fontSize: 16,
     fontWeight: '700',
+    letterSpacing: -0.2,
   },
   status: {
     fontSize: 12,
@@ -119,7 +143,7 @@ const styles = StyleSheet.create({
   actions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
   },
   actionBtn: {
     width: 38,

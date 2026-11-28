@@ -43,6 +43,43 @@ input[type=number]{
     animation-name: tada;
 }
 
-video{
-   transform: scaleX(-1);
+@keyframes msgPopIn {
+    0% {
+      opacity: 0;
+      transform: translateY(10px) scale(0.95);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+}
+
+@keyframes stickerPopIn {
+    0% {
+      opacity: 0;
+      transform: translateY(12px) scale(0.74);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+}
+
+.msg-pop-in {
+    animation: msgPopIn 180ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    will-change: transform, opacity;
+}
+
+.sticker-pop-in {
+    animation: stickerPopIn 210ms cubic-bezier(0.18, 0.89, 0.32, 1.12) forwards;
+    will-change: transform, opacity;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+
+.no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
 }

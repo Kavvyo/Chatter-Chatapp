@@ -68,7 +68,8 @@
         }
       ],
       "expo-notifications",
-      "./plugins/withCallSupport"
+      "./plugins/withCallSupport",
+      "./plugins/withStickerSupport"
     ],
     "experiments": {
       "typedRoutes": true,

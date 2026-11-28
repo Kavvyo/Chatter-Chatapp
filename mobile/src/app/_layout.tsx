@@ -4,6 +4,7 @@ import { View, StyleSheet, Platform } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
+import * as Linking from 'expo-linking';
 import { NavigationBar } from 'expo-navigation-bar';
 import * as SystemUI from 'expo-system-ui';
 import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
@@ -12,6 +13,8 @@ import { useThemeStore } from '../store/useThemeStore';
 import { useCallStore } from '../store/useCallStore';
 import { useChatStore } from '../store/useChatStore';
 import { useFriendsStore } from '../store/useFriendsStore';
+import { useStickerStore } from '../store/useStickerStore';
+import { useToastStore } from '../store/useToastStore';
 import { setupCallNotificationListeners } from '../lib/notifications';
 import { IncomingCallModal } from '../components/call/IncomingCallModal';
 import { ActiveCallView } from '../components/call/ActiveCallView';
@@ -32,11 +35,34 @@ export default function RootLayout() {
   const segments = useSegments();
   const router = useRouter();
 
-  // Load theme and check authentication, immediately dismissing native splash screen
+  // Load theme, stickers, and check authentication, immediately dismissing native splash screen
   useEffect(() => {
     loadTheme();
+    useStickerStore.getState().hydrateStickers();
     checkAuth();
     SplashScreen.hideAsync().catch(() => {});
+  }, []);
+
+  // Import WhatsApp sticker packs opened or shared from external apps (.wastickers / .zip / .webp)
+  useEffect(() => {
+    const handleIncomingUrl = async (incomingUrl: string | null) => {
+      if (!incomingUrl) return;
+      const lower = incomingUrl.toLowerCase();
+      if (incomingUrl.startsWith('chatter://') || (!incomingUrl.startsWith('content://') && !incomingUrl.startsWith('file://'))) {
+        return;
+      }
+      if (!lower.includes('wasticker') && !lower.includes('.zip') && !lower.includes('.webp') && !incomingUrl.startsWith('content://')) {
+        return;
+      }
+      const res = await useStickerStore.getState().importFromExternalUri(incomingUrl);
+      useToastStore.getState().showToast(res.message, res.ok ? 'success' : 'error');
+    };
+
+    Linking.getInitialURL().then(handleIncomingUrl).catch(() => {});
+    const sub = Linking.addEventListener('url', ({ url }) => {
+      handleIncomingUrl(url);
+    });
+    return () => sub.remove();
   }, []);
 
   // Listen to incoming call push notifications (foreground, background, & cold-start launches)

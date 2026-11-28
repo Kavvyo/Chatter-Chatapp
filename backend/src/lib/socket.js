@@ -56,6 +56,7 @@ const io = new Server(server, {
         credentials: true
     },
     transports: ["websocket", "polling"],
+    maxHttpBufferSize: 2 * 1024 * 1024,
     pingTimeout: 10000,
     pingInterval: 8000,
 });
@@ -163,6 +164,93 @@ io.on("connection", (socket) => {
     // Lightweight heartbeat probe so mobile clients recover immediately from OS-suspended sockets
     socket.on("heartbeat", (ack) => {
         if (typeof ack === "function") ack({ ok: true });
+    });
+
+    // Ephemeral P2P sticker relay (zero server disk/DB/Cloudinary storage)
+    socket.on("sendSticker", async (payload = {}, ack) => {
+        try {
+            const senderId = socket.userId;
+            const { to, messageId, stickerHash, isAnimated, width, height, dataBase64, createdAt } = payload;
+
+            if (!senderId || !to || !messageId || !stickerHash) {
+                if (typeof ack === "function") ack({ ok: false, message: "Invalid sticker payload" });
+                return;
+            }
+
+            if (typeof dataBase64 === "string" && dataBase64.length > 1_400_000) {
+                if (typeof ack === "function") ack({ ok: false, message: "Sticker exceeds 1 MB limit" });
+                return;
+            }
+
+            const targetId = to.toString();
+            const areFriends = await checkAreFriends(senderId, targetId);
+            if (!areFriends) {
+                if (typeof ack === "function") ack({ ok: false, message: "You must be friends to send stickers." });
+                return;
+            }
+
+            const targetSockets = userSocketsMap.get(targetId);
+            const isTargetOnline = Boolean(targetSockets && targetSockets.size > 0);
+            if (!isTargetOnline) {
+                if (typeof ack === "function") {
+                    ack({ ok: true, delivered: false, offline: true, messageId });
+                }
+                return;
+            }
+
+            const wireSticker = {
+                _id: messageId.toString(),
+                senderId: senderId.toString(),
+                receiverId: targetId,
+                isSticker: true,
+                stickerHash: stickerHash.toString(),
+                isAnimated: Boolean(isAnimated),
+                width: width || 512,
+                height: height || 512,
+                ...(typeof dataBase64 === "string" && dataBase64.length > 0 ? { dataBase64 } : {}),
+                createdAt: createdAt || new Date().toISOString(),
+            };
+
+            io.to(targetId).emit("newSticker", wireSticker);
+            socket.to(senderId.toString()).emit("newSticker", wireSticker);
+
+            if (typeof ack === "function") {
+                ack({ ok: true, delivered: true, offline: false, messageId });
+            }
+        } catch (err) {
+            if (typeof ack === "function") {
+                ack({ ok: false, message: err?.message || "Failed to relay sticker" });
+            }
+        }
+    });
+
+    socket.on("stickerDelivered", ({ to, messageId, stickerHash } = {}) => {
+        if (!socket.userId || !to || !messageId) return;
+        io.to(to.toString()).emit("stickerDelivered", {
+            peerId: socket.userId.toString(),
+            messageId,
+            stickerHash,
+        });
+    });
+
+    socket.on("stickerRead", ({ to, messageIds } = {}) => {
+        if (!socket.userId || !to || !Array.isArray(messageIds) || messageIds.length === 0) return;
+        const cleanIds = messageIds.map((id) => id?.toString()).filter(Boolean);
+        if (cleanIds.length === 0) return;
+        io.to(to.toString()).emit("messageRead", {
+            readerId: socket.userId.toString(),
+            messages: cleanIds.map((_id) => ({ _id })),
+            messageIds: cleanIds,
+        });
+    });
+
+    socket.on("requestSticker", ({ to, messageId, stickerHash } = {}) => {
+        if (!socket.userId || !to || !stickerHash) return;
+        io.to(to.toString()).emit("stickerRequested", {
+            from: socket.userId.toString(),
+            messageId,
+            stickerHash,
+        });
     });
 
     socket.on("disconnect", () => {

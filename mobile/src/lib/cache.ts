@@ -83,6 +83,28 @@ export async function setCachedUnreadCounts(
   await writeJson(`${userPrefix(userId)}unread`, counts);
 }
 
+export interface PendingStickerOutboxItem {
+  messageId: string;
+  peerId: string;
+  stickerHash: string;
+  stickerUri?: string;
+  isAnimated?: boolean;
+  createdAt: string;
+}
+
+export async function getPendingStickerOutbox(
+  userId: string
+): Promise<PendingStickerOutboxItem[]> {
+  return (await readJson<PendingStickerOutboxItem[]>(`${userPrefix(userId)}sticker_outbox`)) || [];
+}
+
+export async function setPendingStickerOutbox(
+  userId: string,
+  items: PendingStickerOutboxItem[]
+): Promise<void> {
+  await writeJson(`${userPrefix(userId)}sticker_outbox`, items.slice(-60));
+}
+
 export async function getCachedMessages<T>(userId: string, peerId: string): Promise<T[] | null> {
   return readJson<T[]>(`${userPrefix(userId)}chat_${peerId}`);
 }

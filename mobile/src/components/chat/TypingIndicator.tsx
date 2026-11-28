@@ -94,7 +94,12 @@ export const TypingIndicator: React.FC<TypingIndicatorProps> = ({ visible, avata
     >
       <Avatar uri={avatarUri} size={30} style={styles.avatar} />
 
-      <View style={[styles.bubble, { backgroundColor: theme.base300 }]}>
+      <View
+        style={[
+          styles.bubble,
+          { backgroundColor: theme.isDark ? theme.neutral : theme.base200 },
+        ]}
+      >
         <View style={styles.dotsRow}>
           {dotAnims.map((anim, index) => {
             const translateY = anim.interpolate({
@@ -144,10 +149,9 @@ const styles = StyleSheet.create({
   },
   bubble: {
     borderRadius: 20,
-    borderBottomLeftRadius: 4,
+    borderBottomLeftRadius: 6,
     paddingHorizontal: 16,
     paddingVertical: 13,
-    elevation: 1,
   },
   dotsRow: {
     flexDirection: 'row',

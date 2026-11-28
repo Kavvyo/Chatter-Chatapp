@@ -62,6 +62,7 @@ function syncChatStateOnActiveOrConnect() {
     const { useChatStore } = require('./useChatStore');
     const chatState = useChatStore.getState();
     chatState.fetchUnreadCounts();
+    chatState.flushPendingStickers();
     if (chatState.selectedUser?._id) {
       chatState.getMessages(chatState.selectedUser._id);
       chatState.markMessageAsRead(chatState.selectedUser._id);
@@ -260,6 +261,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     socket.on('getOnlineUsers', (userIds: string[]) => {
       set({ onlineUsers: userIds });
+      try {
+        const { useChatStore } = require('./useChatStore');
+        useChatStore.getState().flushPendingStickers();
+      } catch {
+        // ignore
+      }
     });
 
     socket.on('connect', () => {

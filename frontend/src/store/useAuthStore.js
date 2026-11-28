@@ -4,6 +4,7 @@ import {create} from 'zustand';
 import {axiosInstanace} from '../lib/axios.js';
 import { useChatStore } from './useChatStore.js';
 import { useCallStore } from './useCallStore.js';
+import { useStickerStore } from './useStickerStore.js';
 
 const BASE_URL = import.meta.env.MODE === "development" ? "http://localhost:5001": "/";
 
@@ -120,14 +121,17 @@ export const useAuthStore = create((set, get) => ({
         
         set({socket: socket});
         
-        // Immediately bind call socket listeners
+        // Immediately bind call socket listeners & hydrate local IndexedDB stickers
+        useStickerStore.getState().hydrateStickers();
         useCallStore.getState().initializeSocketListeners(socket);
         socket.on("connect", () => {
             useCallStore.getState().initializeSocketListeners(socket);
+            useChatStore.getState().flushStickerOutbox(get().onlineUsers);
         });
 
         socket.on("getOnlineUsers", (userIds) => {
-            set({onlineUsers: userIds})
+            set({onlineUsers: userIds});
+            useChatStore.getState().flushStickerOutbox(userIds);
         });
 
         socket.on("newFriendship", (newFriendship) => {
