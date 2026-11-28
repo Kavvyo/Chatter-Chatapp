@@ -25,7 +25,7 @@ const STICKER_PACKS_KEY = 'chatter_sticker_packs_v1';
 const RECENT_STICKERS_KEY = 'chatter_recent_stickers_v1';
 const CUSTOM_PACK_ID = 'chatter_custom_stickers';
 export const SAVED_PACK_ID = 'chatter_saved_stickers';
-const MAX_STICKER_BYTES = 950_000;
+const MAX_STICKER_BYTES = 1_800_000;
 const MAX_PACK_STICKERS = 60;
 
 const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -506,7 +506,7 @@ export async function installStickerFilesIntoPack(
   }
 
   if (addedStickers.length === 0 && existingStickers.length === 0) {
-    throw new Error('No valid .webp or .png sticker files under 950 KB were selected.');
+    throw new Error('No valid .webp or .png sticker files under 1.8 MB were found.');
   }
 
   const combined = [...addedStickers, ...existingStickers];
@@ -540,6 +540,74 @@ export async function importStickerFromUri(
   const customPack = existingPacks.find((p) => p.id.startsWith(CUSTOM_PACK_ID)) || null;
   const pack = await installStickerFilesIntoPack([file], 'My Stickers', 'Imported', customPack);
   return { pack, isNewPack: !customPack };
+}
+
+export async function importStickerBatchFromPaths(
+  uris: string[],
+  existingPacks: StickerPack[],
+  options?: {
+    packName?: string;
+    author?: string;
+    trayUri?: string | null;
+    createDedicatedPack?: boolean;
+  }
+): Promise<{ pack: StickerPack; isNewPack: boolean }> {
+  const validUris = uris.filter(Boolean);
+  if (validUris.length === 0) {
+    throw new Error('No sticker files received.');
+  }
+
+  if (validUris.length === 1 && !options?.createDedicatedPack) {
+    return importStickerFromUri(validUris[0], existingPacks);
+  }
+
+  // If multiple URIs include an archive, install that archive directly
+  for (const uri of validUris) {
+    try {
+      const f = new File(uri);
+      const bytes = await f.bytes();
+      if (isZipBytes(bytes) || uri.toLowerCase().includes('.wasticker')) {
+        const pack = await installWastickersArchive(
+          bytes,
+          options?.packName || f.name || 'WhatsApp Stickers'
+        );
+        return { pack, isNewPack: true };
+      }
+    } catch {
+      // ignore non-archive check
+    }
+  }
+
+  const files = validUris.map((u) => new File(u));
+  const targetExisting = options?.createDedicatedPack
+    ? null
+    : existingPacks.find((p) => p.id.startsWith(CUSTOM_PACK_ID)) || null;
+
+  const pack = await installStickerFilesIntoPack(
+    files,
+    options?.packName || 'Imported Stickers',
+    options?.author || 'Sticker Maker',
+    targetExisting
+  );
+
+  // Copy tray icon safely into permanent pack directory so cache clearing never breaks tray thumbnail
+  if (options?.trayUri && Platform.OS !== 'web') {
+    try {
+      const traySrc = new File(options.trayUri);
+      const trayBytes = await traySrc.bytes();
+      if (trayBytes.length > 0) {
+        const trayExt = detectExt(trayBytes, options.trayUri) || 'webp';
+        const packDir = new Directory(getDirs().packs, pack.id);
+        const trayDest = new File(packDir, `tray.${trayExt}`);
+        writeBytesToFile(trayDest, trayBytes);
+        pack.trayUri = trayDest.uri;
+      }
+    } catch {
+      // Keep default first-sticker trayUri fallback
+    }
+  }
+
+  return { pack, isNewPack: !targetExisting };
 }
 
 export function deleteStickerPackFiles(packId: string) {

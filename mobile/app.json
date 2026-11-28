@@ -63,7 +63,7 @@
             "gifEnabled": false,
             "webpEnabled": false,
             "networkInspector": false,
-            "extraProguardRules": "-dontwarn **"
+            "extraProguardRules": "-dontwarn **\n-keep class com.kavindu.chatter.StickerIntentModule { *; }\n-keep class com.kavindu.chatter.StickerIntentPackage { *; }\n-keep class com.kavindu.chatter.StickerIntentHandler { *; }"
           }
         }
       ],

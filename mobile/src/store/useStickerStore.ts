@@ -3,6 +3,7 @@ import { Directory, File } from 'expo-file-system';
 import {
   copyStickerIntoSavedPack,
   deleteStickerPackFiles,
+  importStickerBatchFromPaths,
   importStickerFromUri,
   installStickerFilesIntoPack,
   installWastickersArchive,
@@ -15,17 +16,38 @@ import {
   type StickerPack,
 } from '../lib/stickers';
 
+export interface ExternalStickerIntentPayload {
+  type: 'started' | 'files' | 'wa_pack' | 'error';
+  paths?: string[];
+  packName?: string;
+  author?: string;
+  trayPath?: string;
+  message?: string;
+}
+
+export interface StickerImportModalState {
+  status: 'importing' | 'success' | 'error';
+  packName?: string;
+  message?: string;
+  pack?: StickerPack;
+}
+
 interface StickerState {
   packs: StickerPack[];
   recentStickers: StickerItem[];
   isHydrated: boolean;
   isImporting: boolean;
+  importModal: StickerImportModalState | null;
 
   hydrateStickers: () => Promise<void>;
+  clearImportModal: () => void;
   importPackArchive: () => Promise<{ ok: boolean; message: string; pack?: StickerPack }>;
   importStickerImages: () => Promise<{ ok: boolean; message: string; pack?: StickerPack }>;
   importWhatsAppFolder: () => Promise<{ ok: boolean; message: string; pack?: StickerPack }>;
   importFromExternalUri: (uri: string) => Promise<{ ok: boolean; message: string; pack?: StickerPack }>;
+  importStickerIntentPayload: (
+    payload: ExternalStickerIntentPayload
+  ) => Promise<{ ok: boolean; message: string; pack?: StickerPack }>;
   saveStickerToCollection: (params: {
     stickerHash: string;
     stickerUri?: string | null;
@@ -34,6 +56,8 @@ interface StickerState {
   deletePack: (packId: string) => Promise<void>;
   recordRecentSticker: (sticker: StickerItem) => Promise<void>;
 }
+
+let hydratePromise: Promise<void> | null = null;
 
 function upsertPack(packs: StickerPack[], pack: StickerPack): StickerPack[] {
   const idx = packs.findIndex((p) => p.id === pack.id);
@@ -46,14 +70,25 @@ export const useStickerStore = create<StickerState>((set, get) => ({
   recentStickers: [],
   isHydrated: false,
   isImporting: false,
+  importModal: null,
+
+  clearImportModal: () => set({ importModal: null }),
 
   hydrateStickers: async () => {
     if (get().isHydrated) return;
-    const [packs, recentStickers] = await Promise.all([
-      loadStickerPacks(),
-      loadRecentStickers(),
-    ]);
-    set({ packs, recentStickers, isHydrated: true });
+    if (!hydratePromise) {
+      hydratePromise = Promise.all([loadStickerPacks(), loadRecentStickers()])
+        .then(([packs, recentStickers]) => {
+          set({ packs, recentStickers, isHydrated: true });
+        })
+        .catch(() => {
+          set({ isHydrated: true });
+        })
+        .finally(() => {
+          hydratePromise = null;
+        });
+    }
+    return hydratePromise;
   },
 
   importPackArchive: async () => {
@@ -174,25 +209,141 @@ export const useStickerStore = create<StickerState>((set, get) => ({
   },
 
   importFromExternalUri: async (uri: string) => {
-    set({ isImporting: true });
+    set({
+      isImporting: true,
+      importModal: { status: 'importing', packName: 'Sticker Pack' },
+    });
     try {
       await get().hydrateStickers();
+      const startedAt = Date.now();
       const { pack } = await importStickerFromUri(uri, get().packs);
       const nextPacks = upsertPack(get().packs, pack);
       await saveStickerPacks(nextPacks);
-      set({ packs: nextPacks });
+      const minAnim = Math.max(0, 420 - (Date.now() - startedAt));
+      if (minAnim > 0) await new Promise<void>((r) => setTimeout(r, minAnim));
+      set({
+        packs: nextPacks,
+        isImporting: false,
+        importModal: {
+          status: 'success',
+          packName: pack.name,
+          message: `${pack.stickers.length} stickers added to Chatter`,
+          pack,
+        },
+      });
       return {
         ok: true,
         message: `Installed "${pack.name}" (${pack.stickers.length} stickers)`,
         pack,
       };
     } catch (error: any) {
+      const msg = error?.message || 'Failed to open sticker pack';
+      set({
+        isImporting: false,
+        importModal: {
+          status: 'error',
+          packName: 'Sticker Pack',
+          message: msg,
+        },
+      });
       return {
         ok: false,
-        message: error?.message || 'Failed to open sticker pack',
+        message: msg,
       };
-    } finally {
-      set({ isImporting: false });
+    }
+  },
+
+  importStickerIntentPayload: async (payload: ExternalStickerIntentPayload) => {
+    if (payload.type === 'started') {
+      set({
+        isImporting: true,
+        importModal: {
+          status: 'importing',
+          packName: payload.packName || 'Sticker Pack',
+        },
+      });
+      return { ok: true, message: 'importing' };
+    }
+
+    if (payload.type === 'error') {
+      const msg = payload.message || 'Could not import stickers from that app.';
+      set({
+        isImporting: false,
+        importModal: {
+          status: 'error',
+          packName: payload.packName || 'Sticker Pack',
+          message: msg,
+        },
+      });
+      return { ok: false, message: msg };
+    }
+
+    const uris = Array.isArray(payload.paths) ? payload.paths.filter(Boolean) : [];
+    if (uris.length === 0) {
+      const msg = 'No sticker files were received from the external app.';
+      set({
+        isImporting: false,
+        importModal: {
+          status: 'error',
+          packName: payload.packName || 'Sticker Pack',
+          message: msg,
+        },
+      });
+      return { ok: false, message: msg };
+    }
+
+    set({
+      isImporting: true,
+      importModal: {
+        status: 'importing',
+        packName: payload.packName || 'Sticker Pack',
+      },
+    });
+    try {
+      await get().hydrateStickers();
+      const startedAt = Date.now();
+      const { pack } = await importStickerBatchFromPaths(uris, get().packs, {
+        packName: payload.packName,
+        author: payload.author,
+        trayUri: payload.trayPath,
+        createDedicatedPack: payload.type === 'wa_pack' || uris.length > 1,
+      });
+      const nextPacks = upsertPack(get().packs, pack);
+      await saveStickerPacks(nextPacks);
+
+      // Give the adding popup animation a clean readable beat before revealing success
+      const minAnim = Math.max(0, 480 - (Date.now() - startedAt));
+      if (minAnim > 0) {
+        await new Promise<void>((r) => setTimeout(r, minAnim));
+      }
+
+      const successMsg = `${pack.stickers.length} stickers added to Chatter`;
+      set({
+        packs: nextPacks,
+        isImporting: false,
+        importModal: {
+          status: 'success',
+          packName: pack.name,
+          message: successMsg,
+          pack,
+        },
+      });
+      return {
+        ok: true,
+        message: `Installed "${pack.name}" (${pack.stickers.length} stickers)`,
+        pack,
+      };
+    } catch (error: any) {
+      const errMsg = error?.message || 'Failed to import stickers.';
+      set({
+        isImporting: false,
+        importModal: {
+          status: 'error',
+          packName: payload.packName || 'Sticker Pack',
+          message: errMsg,
+        },
+      });
+      return { ok: false, message: errMsg };
     }
   },
 

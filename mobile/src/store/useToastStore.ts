@@ -34,9 +34,10 @@ export const useToastStore = create<ToastState>((set) => ({
   showToast: (message: string, type: ToastType = 'info') => {
     if (toastTimer) clearTimeout(toastTimer);
     set({ toast: { message, type } });
+    const durationMs = type === 'error' ? 5200 : 3200;
     toastTimer = setTimeout(() => {
       set({ toast: null });
-    }, 3200);
+    }, durationMs);
   },
 
   hideToast: () => {

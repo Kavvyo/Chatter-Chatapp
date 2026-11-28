@@ -85,7 +85,7 @@ export const ThemedToast: React.FC = () => {
         style={[styles.toastContainer, { backgroundColor: bg }]}
       >
         <Icon size={20} color={text} style={styles.icon} />
-        <Text style={[styles.message, { color: text }]} numberOfLines={2}>
+        <Text style={[styles.message, { color: text }]} numberOfLines={4}>
           {toast.message}
         </Text>
         <TouchableOpacity onPress={handleDismiss} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>

@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { View, StyleSheet, Platform } from 'react-native';
+import { View, StyleSheet, Platform, NativeEventEmitter, NativeModules } from 'react-native';
 
 import { StatusBar } from 'expo-status-bar';
 import { Stack, useRouter, useSegments } from 'expo-router';
@@ -20,6 +20,7 @@ import { IncomingCallModal } from '../components/call/IncomingCallModal';
 import { ActiveCallView } from '../components/call/ActiveCallView';
 import { ThemedToast } from '../components/ui/ThemedToast';
 import { ThemedAlertModal } from '../components/ui/ThemedAlertModal';
+import { StickerImportModal } from '../components/ui/StickerImportModal';
 
 export default function RootLayout() {
   const { authUser, isCheckingAuth, checkAuth, socket } = useAuthStore();
@@ -43,15 +44,47 @@ export default function RootLayout() {
     SplashScreen.hideAsync().catch(() => {});
   }, []);
 
-  // Import WhatsApp sticker packs opened or shared from external apps (.wastickers / .zip / .webp)
+  // Import WhatsApp sticker packs opened, shared (EXTRA_STREAM), or pushed via ENABLE_STICKER_PACK
   useEffect(() => {
+    const stickerIntentModule = NativeModules.StickerIntentModule;
+
+    const handleNativePayload = async (payload: any) => {
+      if (!payload || !payload.type) return;
+      await useStickerStore.getState().importStickerIntentPayload(payload);
+    };
+
+    if (Platform.OS === 'android' && stickerIntentModule) {
+      // Register listener BEFORE consuming pending cold-start imports so no event can slip through
+      const emitter = new NativeEventEmitter(stickerIntentModule);
+      const nativeSub = emitter.addListener('onStickerIntent', handleNativePayload);
+
+      stickerIntentModule
+        .consumePendingImports?.()
+        .then((list: any[]) => {
+          if (Array.isArray(list)) {
+            list.forEach((item) => handleNativePayload(item));
+          }
+        })
+        .catch(() => {});
+
+      return () => nativeSub.remove();
+    }
+
     const handleIncomingUrl = async (incomingUrl: string | null) => {
       if (!incomingUrl) return;
       const lower = incomingUrl.toLowerCase();
-      if (incomingUrl.startsWith('chatter://') || (!incomingUrl.startsWith('content://') && !incomingUrl.startsWith('file://'))) {
+      if (
+        incomingUrl.startsWith('chatter://') ||
+        (!incomingUrl.startsWith('content://') && !incomingUrl.startsWith('file://'))
+      ) {
         return;
       }
-      if (!lower.includes('wasticker') && !lower.includes('.zip') && !lower.includes('.webp') && !incomingUrl.startsWith('content://')) {
+      if (
+        !lower.includes('wasticker') &&
+        !lower.includes('.zip') &&
+        !lower.includes('.webp') &&
+        !incomingUrl.startsWith('content://')
+      ) {
         return;
       }
       const res = await useStickerStore.getState().importFromExternalUri(incomingUrl);
@@ -138,6 +171,7 @@ export default function RootLayout() {
         <ActiveCallView />
         <ThemedToast />
         <ThemedAlertModal />
+        <StickerImportModal />
       </View>
     </SafeAreaProvider>
   );
