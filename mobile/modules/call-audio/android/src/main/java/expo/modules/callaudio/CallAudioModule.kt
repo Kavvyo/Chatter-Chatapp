@@ -7,9 +7,16 @@ import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.MediaPlayer
+import android.media.Ringtone
+import android.media.RingtoneManager
+import android.media.ToneGenerator
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.util.Rational
+import android.view.WindowManager
 import expo.modules.kotlin.exception.Exceptions
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -21,6 +28,11 @@ class CallAudioModule : Module() {
   private var proximityWakeLock: PowerManager.WakeLock? = null
   private var audioFocusRequest: AudioFocusRequest? = null
   private var legacyAudioFocusGranted = false
+  private var ringtonePlayer: MediaPlayer? = null
+  private var fallbackRingtone: Ringtone? = null
+  private var ringbackToneGen: ToneGenerator? = null
+  private val ringHandler = Handler(Looper.getMainLooper())
+  private var ringbackRunnable: Runnable? = null
 
   override fun definition() = ModuleDefinition {
     Name("CallAudio")
@@ -46,7 +58,23 @@ class CallAudioModule : Module() {
     }
 
     Function("stopCallAudio") {
+      stopRingingInternal()
       cleanupCallAudio()
+      return@Function true
+    }
+
+    Function("playIncomingRingtone") {
+      playIncomingRingtoneInternal()
+      return@Function true
+    }
+
+    Function("playOutgoingRingback") {
+      playOutgoingRingbackInternal()
+      return@Function true
+    }
+
+    Function("stopRinging") {
+      stopRingingInternal()
       return@Function true
     }
 
@@ -81,6 +109,21 @@ class CallAudioModule : Module() {
         return@Function activity.isInPictureInPictureMode
       }
       return@Function false
+    }
+
+    Function("setScreenshotProtection") { enabled: Boolean ->
+      val activity = appContext.currentActivity ?: return@Function false
+      activity.runOnUiThread {
+        try {
+          if (enabled) {
+            activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+          } else {
+            activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+          }
+        } catch (_: Exception) {
+        }
+      }
+      return@Function true
     }
 
     OnDestroy {
@@ -194,7 +237,101 @@ class CallAudioModule : Module() {
     }
   }
 
+  @Synchronized
+  private fun playIncomingRingtoneInternal() {
+    stopRingingInternal()
+    try {
+      val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+      if (audioManager.ringerMode != AudioManager.RINGER_MODE_NORMAL) {
+        return
+      }
+      val ringtoneUri = RingtoneManager.getActualDefaultRingtoneUri(
+        context,
+        RingtoneManager.TYPE_RINGTONE
+      ) ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE) ?: return
+
+      try {
+        val player = MediaPlayer().apply {
+          setAudioAttributes(
+            AudioAttributes.Builder()
+              .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+              .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+              .build()
+          )
+          setDataSource(context, ringtoneUri)
+          isLooping = true
+          prepare()
+          start()
+        }
+        ringtonePlayer = player
+      } catch (_: Exception) {
+        val ringtone = RingtoneManager.getRingtone(context, ringtoneUri)
+        if (ringtone != null) {
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            ringtone.isLooping = true
+          }
+          ringtone.play()
+          fallbackRingtone = ringtone
+        }
+      }
+    } catch (_: Exception) {
+    }
+  }
+
+  @Synchronized
+  private fun playOutgoingRingbackInternal() {
+    stopRingingInternal()
+    try {
+      val gen = ToneGenerator(AudioManager.STREAM_VOICE_CALL, 72)
+      ringbackToneGen = gen
+      val runnable = object : Runnable {
+        override fun run() {
+          try {
+            ringbackToneGen?.startTone(ToneGenerator.TONE_SUP_RINGTONE, 1200)
+          } catch (_: Exception) {
+          }
+          ringHandler.postDelayed(this, 3200L)
+        }
+      }
+      ringbackRunnable = runnable
+      ringHandler.post(runnable)
+    } catch (_: Exception) {
+    }
+  }
+
+  @Synchronized
+  private fun stopRingingInternal() {
+    try {
+      ringbackRunnable?.let { ringHandler.removeCallbacks(it) }
+    } catch (_: Exception) {
+    }
+    ringbackRunnable = null
+
+    try {
+      ringbackToneGen?.stopTone()
+      ringbackToneGen?.release()
+    } catch (_: Exception) {
+    }
+    ringbackToneGen = null
+
+    try {
+      ringtonePlayer?.apply {
+        if (isPlaying) stop()
+        release()
+      }
+    } catch (_: Exception) {
+    }
+    ringtonePlayer = null
+
+    try {
+      fallbackRingtone?.stop()
+    } catch (_: Exception) {
+    }
+    fallbackRingtone = null
+  }
+
   private fun cleanupCallAudio() {
+    stopRingingInternal()
     releaseProximityLock()
     try {
       val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager

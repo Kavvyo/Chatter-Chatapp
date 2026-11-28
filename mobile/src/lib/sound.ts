@@ -1,28 +1,41 @@
 import { Vibration } from 'react-native';
+import {
+  playNativeIncomingRingtone,
+  playNativeOutgoingRingback,
+  stopNativeRinging,
+} from './callAudio';
 
 let vibrationActive = false;
 
 /**
- * Trigger phone call vibration ring cadence when receiving an incoming call.
- * Uses core React Native Vibration which is 100% native and does not depend on
- * deprecated native audio modules in Expo Go SDK 58.
+ * Play device ringtone audio + vibration cadence when receiving an incoming call.
  */
 export async function playRingtone() {
   await stopCallSounds();
 
+  playNativeIncomingRingtone();
   try {
     vibrationActive = true;
     // Phone ring vibration pattern: wait 0ms, vibrate 1000ms, pause 1200ms (repeats)
     Vibration.vibrate([0, 1000, 1200, 1000], true);
   } catch {
-    // Graceful fallback for devices or environments without vibration hardware
+    // Graceful fallback for devices without vibration hardware
   }
 }
 
 /**
- * Immediately cancels the vibration ring pattern when the call is answered, rejected, or ended.
+ * Play dual-tone telephone ringback while awaiting callee pickup.
+ */
+export async function playOutgoingRingback() {
+  await stopCallSounds();
+  playNativeOutgoingRingback();
+}
+
+/**
+ * Immediately stops all ringtone audio, outgoing ringback, and vibration.
  */
 export async function stopCallSounds() {
+  stopNativeRinging();
   if (vibrationActive) {
     try {
       Vibration.cancel();

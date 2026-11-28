@@ -83,3 +83,16 @@ input[type=number]{
     -ms-overflow-style: none;
     scrollbar-width: none;
 }
+
+.privacy-protected-media {
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-user-drag: none;
+}
+
+@media print {
+    body.privacy-block-print {
+        display: none !important;
+    }
+}

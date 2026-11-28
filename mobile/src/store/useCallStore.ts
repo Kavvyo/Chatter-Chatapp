@@ -3,7 +3,7 @@ import { create } from 'zustand';
 import { Socket } from 'socket.io-client';
 import { useAuthStore } from './useAuthStore';
 import { useToastStore } from './useToastStore';
-import { playRingtone, stopCallSounds } from '../lib/sound';
+import { playRingtone, playOutgoingRingback, stopCallSounds } from '../lib/sound';
 import { requestCallPermissions, type CallPermissionResult } from '../lib/permissions';
 import { axiosInstance } from '../lib/axios';
 import {
@@ -149,8 +149,10 @@ export const useCallStore = create<CallState>((set, get) => ({
       case 'PARTICIPANT_CONNECTED': {
         if (!get().callActive) return;
         stopCallSounds();
-        const { callTimeoutId } = get();
+        const { callTimeoutId, isSpeakerOn, callType, isMinimized } = get();
         if (callTimeoutId) clearTimeout(callTimeoutId);
+        // Only update ear proximity sensor here; avoid re-calling setSpeakerphoneOn which resets Android AudioHAL
+        setProximityEnabled(callType === 'voice' && !isSpeakerOn && !isMinimized);
         set({
           callStatus: 'connected',
           callAccepted: true,
@@ -294,10 +296,13 @@ export const useCallStore = create<CallState>((set, get) => ({
 
     socket.on('callAccepted', () => {
       stopCallSounds();
-      const { callTimeoutId, roomName, preparedToken, preparedUrl } = get();
+      const { callTimeoutId, roomName, preparedToken, preparedUrl, callStatus } = get();
       if (callTimeoutId) clearTimeout(callTimeoutId);
-      set({ callAccepted: true, callStatus: 'connected', callTimeoutId: null });
-      get().startDurationTimer();
+      set({
+        callAccepted: true,
+        callStatus: callStatus === 'connected' ? 'connected' : 'connecting',
+        callTimeoutId: null,
+      });
 
       if (roomName && (!preparedToken || !preparedUrl)) {
         get().resolveCallCredentials(roomName);
@@ -421,8 +426,9 @@ export const useCallStore = create<CallState>((set, get) => ({
     const roomName = `call_${authUser._id}_${userToCall._id}_${Date.now()}`;
     const initialSpeaker = type === 'video';
 
-    // Initialize Android audio communication routing & voice call proximity sensor
+    // Initialize Android audio communication routing, ear proximity & outgoing ringback
     startCallAudio(initialSpeaker, type === 'voice' && !initialSpeaker);
+    playOutgoingRingback();
 
     set({
       callActive: true,
@@ -553,7 +559,7 @@ export const useCallStore = create<CallState>((set, get) => ({
       callAccepted: true,
       callActive: true,
       receivingCall: false,
-      callStatus: 'connected',
+      callStatus: 'connecting',
       callDuration: 0,
       isCaller: false,
       isMicMuted: false,
@@ -579,9 +585,7 @@ export const useCallStore = create<CallState>((set, get) => ({
       });
     }
 
-    get().startDurationTimer();
-
-    // 2. Ensure LiveKit token & URL are present so WebView connects immediately
+    // Ensure LiveKit token & URL are present (duration timer begins once media track connects)
     await get().resolveCallCredentials(roomName, preparedToken, preparedUrl);
   },
 

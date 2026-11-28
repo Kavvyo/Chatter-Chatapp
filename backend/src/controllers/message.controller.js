@@ -58,6 +58,7 @@ export const getMessages = async (req, res) => {
                         messages: deltaMessages,
                         clearedAt: clearDoc?.clearedAt ? clearDoc.clearedAt.toISOString() : null,
                         serverCount,
+                        serverNow: new Date().toISOString(),
                     });
                 }
 
@@ -94,6 +95,7 @@ export const getMessages = async (req, res) => {
                 return res.status(200).json({
                     messages: recentDesc.reverse(),
                     clearedAt: clearDoc?.clearedAt ? clearDoc.clearedAt.toISOString() : null,
+                    serverNow: new Date().toISOString(),
                 });
             }
 
@@ -102,6 +104,21 @@ export const getMessages = async (req, res) => {
                 .limit(safeLimit);
 
             return res.status(200).json(recentDesc.reverse());
+        }
+
+        if (req.query.syncMeta === "1") {
+            const pairKey = getConversationPairKey(myId, userToChatId);
+            const [messages, clearDoc] = await Promise.all([
+                Message.find(baseFilter).sort({ createdAt: 1 }),
+                ConversationClear.findOne({ participantsKey: pairKey })
+                    .select("clearedAt")
+                    .lean(),
+            ]);
+            return res.status(200).json({
+                messages,
+                clearedAt: clearDoc?.clearedAt ? clearDoc.clearedAt.toISOString() : null,
+                serverNow: new Date().toISOString(),
+            });
         }
 
         // Default unpaginated response (100% backward compatible with Web client)
@@ -232,7 +249,7 @@ export const unreadCounts = async (req, res) => {
                 }
             }
 
-            return res.json({ counts, clears });
+            return res.json({ counts, clears, serverNow: new Date().toISOString() });
         }
 
         const unreadCounts = await Message.aggregate([

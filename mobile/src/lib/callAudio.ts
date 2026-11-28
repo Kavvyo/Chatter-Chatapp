@@ -6,6 +6,10 @@ interface NativeCallAudioModule {
   setSpeakerphoneOn(enabled: boolean): boolean;
   setProximityEnabled(enabled: boolean): boolean;
   stopCallAudio(): boolean;
+  playIncomingRingtone(): boolean;
+  playOutgoingRingback(): boolean;
+  stopRinging(): boolean;
+  setScreenshotProtection(enabled: boolean): boolean;
   enterPictureInPicture(widthRatio: number, heightRatio: number): boolean;
   isInPictureInPictureMode(): boolean;
 }
@@ -47,6 +51,38 @@ export function stopCallAudio() {
     CallAudioNative?.stopCallAudio();
   } catch {
     // Safe no-op
+  }
+}
+
+export function playNativeIncomingRingtone() {
+  try {
+    CallAudioNative?.playIncomingRingtone?.();
+  } catch {
+    // Safe fallback
+  }
+}
+
+export function playNativeOutgoingRingback() {
+  try {
+    CallAudioNative?.playOutgoingRingback?.();
+  } catch {
+    // Safe fallback
+  }
+}
+
+export function stopNativeRinging() {
+  try {
+    CallAudioNative?.stopRinging?.();
+  } catch {
+    // Safe fallback
+  }
+}
+
+export function setScreenshotProtection(enabled: boolean) {
+  try {
+    CallAudioNative?.setScreenshotProtection?.(enabled);
+  } catch {
+    // Safe fallback in Expo Go or unsupported platforms
   }
 }
 

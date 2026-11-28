@@ -1,7 +1,8 @@
 import { Link } from "react-router-dom";
 import { THEMES } from "../constants";
 import { useThemeStore } from "../store/useThemeStore";
-import { Send, X } from "lucide-react";
+import { usePrivacyStore } from "../store/usePrivacyStore";
+import { Send, ShieldCheck, X } from "lucide-react";
 
 const PREVIEW_MESSAGES = [
   { id: 1, content: "Hey! How's it going?", isSent: false },
@@ -10,19 +11,68 @@ const PREVIEW_MESSAGES = [
 
 const SettingsPage = () => {
   const { theme, setTheme } = useThemeStore();
+  const { protectScreenshots, setProtectScreenshots } = usePrivacyStore();
 
   return (
-    <div className="h-screen container mx-auto px-4 pt-20 max-w-5xl">
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div className="flex flex-col gap-1">
-            <h2 className="text-lg font-semibold">Theme</h2>
-            <p className="text-sm text-base-content/70">Choose a theme for your chat interface</p>
-          </div>
-            <Link to={'/'} className="flex justify-center items-center rounded-full 
-                                      size-8 lg:size-10 border-2 border-gray-700 hover:border-red-500 transition-colors">
-              <X className=""/>
+    <div className="min-h-screen container mx-auto px-4 pt-20 pb-10 max-w-5xl">
+      <div className="space-y-8">
+        {/* Privacy Section */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex flex-col gap-1">
+              <h2 className="text-lg font-semibold">Privacy</h2>
+              <p className="text-sm text-base-content/70">
+                Control screenshot and media capture protection
+              </p>
+            </div>
+            <Link
+              to="/"
+              className="flex justify-center items-center rounded-full size-8 lg:size-10 border-2 border-base-300 hover:border-error transition-colors"
+              aria-label="Close settings"
+            >
+              <X className="size-4" />
             </Link>
+          </div>
+
+          <label className="flex items-center justify-between gap-4 p-4 rounded-2xl bg-base-200/80 border border-base-300 cursor-pointer">
+            <div className="flex items-start gap-3.5 min-w-0">
+              <div className="size-10 rounded-xl bg-primary/15 text-primary flex items-center justify-center shrink-0 mt-0.5">
+                <ShieldCheck className="size-5" />
+              </div>
+              <div className="space-y-0.5 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-sm sm:text-base">
+                    Screenshot Protection
+                  </span>
+                  <span
+                    className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${
+                      protectScreenshots
+                        ? "bg-primary/15 text-primary"
+                        : "bg-base-300 text-base-content/60"
+                    }`}
+                  >
+                    {protectScreenshots ? "Protected" : "Off"}
+                  </span>
+                </div>
+                <p className="text-xs sm:text-sm text-base-content/65 leading-relaxed">
+                  Blocks media saving, Picture-in-Picture, selection, and printing inside Web chats & calls. Full OS-level screenshot & screen-recording blocking applies natively in the Chatter Android app.
+                </p>
+              </div>
+            </div>
+
+            <input
+              type="checkbox"
+              className="toggle toggle-primary shrink-0"
+              checked={protectScreenshots}
+              onChange={(e) => setProtectScreenshots(e.target.checked)}
+            />
+          </label>
+        </div>
+
+        {/* Theme Section */}
+        <div className="flex flex-col gap-1">
+          <h2 className="text-lg font-semibold">Theme</h2>
+          <p className="text-sm text-base-content/70">Choose a theme for your chat interface</p>
         </div>
 
         <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2">

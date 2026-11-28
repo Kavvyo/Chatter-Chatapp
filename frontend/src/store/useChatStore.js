@@ -9,6 +9,7 @@ import {
   getLocalStickerMessages,
   getStickerOutbox,
   markLocalStickersRead,
+  pruneLocalStickerMessagesBefore,
   readStickerBase64,
   resolveLocalStickerUri,
   saveLocalStickerMessage,
@@ -107,14 +108,35 @@ export const useChatStore = create((set, get) => ({
         try {
             const myId = useAuthStore.getState().authUser?._id;
             const [res, localStickers] = await Promise.all([
-                axiosInstanace.get(`/messages/${userId}`),
+                axiosInstanace.get(`/messages/${userId}`, { params: { syncMeta: "1" } }),
                 myId ? getLocalStickerMessages(myId, userId) : Promise.resolve([]),
             ]);
 
-            const serverMsgs = Array.isArray(res.data) ? res.data : [];
+            const payload = res.data;
+            const serverMsgs = Array.isArray(payload) ? payload : payload?.messages || [];
+            const clearedAt = Array.isArray(payload) ? null : payload?.clearedAt || null;
+            const serverNow = Array.isArray(payload) ? null : payload?.serverNow || null;
+
+            let validStickers = localStickers;
+            if (clearedAt) {
+                const offsetMs = serverNow
+                    ? Date.now() - new Date(serverNow).getTime()
+                    : 0;
+                const cutoffMs = new Date(clearedAt).getTime() + offsetMs;
+                if (!Number.isNaN(cutoffMs)) {
+                    validStickers = localStickers.filter((s) => {
+                        const t = s.clientCreatedAt || new Date(s.createdAt || 0).getTime();
+                        return !Number.isNaN(t) && t > cutoffMs;
+                    });
+                    if (myId && validStickers.length !== localStickers.length) {
+                        pruneLocalStickerMessagesBefore(myId, userId, cutoffMs);
+                    }
+                }
+            }
+
             const seenIds = new Set(serverMsgs.map((m) => m._id?.toString()));
             const merged = [...serverMsgs];
-            for (const stk of localStickers) {
+            for (const stk of validStickers) {
                 if (!seenIds.has(stk._id?.toString())) {
                     merged.push(stk);
                     seenIds.add(stk._id?.toString());
@@ -127,7 +149,7 @@ export const useChatStore = create((set, get) => ({
             }
 
             // Mark unread incoming local stickers as read now that the chat is open
-            const unreadIncomingStickers = localStickers.filter(
+            const unreadIncomingStickers = validStickers.filter(
                 (s) => s.senderId?.toString() === userId?.toString() && !s.read
             );
             if (unreadIncomingStickers.length > 0 && myId) {
@@ -499,13 +521,22 @@ export const useChatStore = create((set, get) => ({
             }
         });
 
-        socket.on("conversationCleared", ({ peerId, clearedAt }) => {
+        socket.on("conversationCleared", async ({ peerId, clearedAt }) => {
             if (!peerId) return;
             const pId = peerId.toString();
-            const cutoffMs = clearedAt ? new Date(clearedAt).getTime() : NaN;
+            const parsedCutoff = clearedAt ? new Date(clearedAt).getTime() : NaN;
+            // Cover minor clock skew on live conversation clears so existing local stickers clear immediately
+            const effectiveCutoff = Number.isNaN(parsedCutoff)
+                ? Date.now()
+                : Math.max(parsedCutoff, Date.now());
             const myId = useAuthStore.getState().authUser?._id;
-            if (myId && Number.isNaN(cutoffMs)) {
-                clearLocalStickerMessages(myId, pId);
+            if (myId) {
+                await clearLocalStickerMessages(myId, pId);
+                const outbox = await getStickerOutbox(myId);
+                const filteredOutbox = outbox.filter((item) => item.peerId?.toString() !== pId);
+                if (filteredOutbox.length !== outbox.length) {
+                    await setStickerOutbox(myId, filteredOutbox);
+                }
             }
 
             set((state) => {
@@ -516,13 +547,11 @@ export const useChatStore = create((set, get) => ({
                     return { unreadCounts: nextUnread };
                 }
 
-                const remaining = Number.isNaN(cutoffMs)
-                    ? state.messages.filter((m) => m._id?.toString().startsWith("temp_"))
-                    : state.messages.filter(
-                          (m) =>
-                              m._id?.toString().startsWith("temp_") ||
-                              new Date(m.createdAt).getTime() > cutoffMs
-                      );
+                const remaining = state.messages.filter(
+                    (m) =>
+                        m._id?.toString().startsWith("temp_") &&
+                        new Date(m.createdAt || 0).getTime() > effectiveCutoff
+                );
 
                 return {
                     unreadCounts: nextUnread,
@@ -720,6 +749,12 @@ export const useChatStore = create((set, get) => ({
         const myId = useAuthStore.getState().authUser?._id;
         if (myId) {
             clearLocalStickerMessages(myId, userId);
+            getStickerOutbox(myId).then((outbox) => {
+                const next = outbox.filter((item) => item.peerId?.toString() !== userId?.toString());
+                if (next.length !== outbox.length) {
+                    setStickerOutbox(myId, next);
+                }
+            });
         }
         set((state) => {
             const nextUnread = { ...state.unreadCounts };

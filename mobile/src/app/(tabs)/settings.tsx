@@ -6,15 +6,18 @@ import {
   StyleSheet,
   ScrollView,
   TextInput,
+  Switch,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Send, Check } from 'lucide-react-native';
+import { Send, Check, ShieldCheck } from 'lucide-react-native';
 import { THEMES, ThemeColors } from '../../constants/themes';
 import { useThemeStore } from '../../store/useThemeStore';
+import { usePrivacyStore } from '../../store/usePrivacyStore';
 import { useToastStore } from '../../store/useToastStore';
 
 export default function SettingsTab() {
   const { theme, themeName, setTheme } = useThemeStore();
+  const { protectScreenshots, setProtectScreenshots } = usePrivacyStore();
   const { showToast } = useToastStore();
 
   const themeKeys = Object.keys(THEMES);
@@ -24,10 +27,60 @@ export default function SettingsTab() {
     showToast(`Theme changed to ${key.charAt(0).toUpperCase() + key.slice(1)}`, 'info');
   };
 
+  const handleToggleScreenshots = (nextValue: boolean) => {
+    setProtectScreenshots(nextValue);
+    showToast(
+      nextValue
+        ? 'Screenshot protection enabled for chats & calls'
+        : 'Screenshot protection turned off',
+      'info'
+    );
+  };
+
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.base100 }]} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.scrollContent}>
-        {/* Header */}
+        {/* Privacy Section */}
+        <View style={styles.sectionHeader}>
+          <Text style={[styles.sectionTitle, { color: theme.baseContent }]}>Privacy</Text>
+          <Text style={[styles.subtitle, { color: theme.baseContentMuted }]}>
+            Control capture and screen security
+          </Text>
+        </View>
+
+        <View
+          style={[
+            styles.privacyCard,
+            { backgroundColor: theme.base200, borderColor: theme.base300 },
+          ]}
+        >
+          <View style={styles.privacyRow}>
+            <View style={[styles.privacyIconWrap, { backgroundColor: theme.primary + '1f' }]}>
+              <ShieldCheck size={22} color={theme.primary} />
+            </View>
+
+            <View style={styles.privacyTextWrap}>
+              <Text style={[styles.privacyTitle, { color: theme.baseContent }]}>
+                Screenshot Protection
+              </Text>
+              <Text style={[styles.privacyDesc, { color: theme.baseContentMuted }]}>
+                Block screenshots and screen recording inside chats, voice calls, and video calls.
+              </Text>
+            </View>
+
+            <Switch
+              value={protectScreenshots}
+              onValueChange={handleToggleScreenshots}
+              trackColor={{
+                false: theme.base300,
+                true: theme.primary + '88',
+              }}
+              thumbColor={protectScreenshots ? theme.primary : '#f4f4f5'}
+            />
+          </View>
+        </View>
+
+        {/* Theme Header */}
         <View style={styles.header}>
           <Text style={[styles.title, { color: theme.baseContent }]}>Theme</Text>
           <Text style={[styles.subtitle, { color: theme.baseContentMuted }]}>
@@ -172,8 +225,45 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     padding: 16,
-    paddingBottom: 40,
+    paddingBottom: 104,
     gap: 16,
+  },
+  sectionHeader: {
+    paddingTop: 6,
+  },
+  sectionTitle: {
+    fontSize: 24,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  privacyCard: {
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 14,
+  },
+  privacyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  privacyIconWrap: {
+    width: 42,
+    height: 42,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  privacyTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  privacyTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  privacyDesc: {
+    fontSize: 12.5,
+    lineHeight: 17,
   },
   header: {
     paddingVertical: 8,

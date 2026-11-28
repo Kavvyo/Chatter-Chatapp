@@ -1,5 +1,7 @@
+import { useEffect } from "react";
 import { Phone, PhoneOff, Video } from "lucide-react";
 import { useCallStore } from "../store/useCallStore";
+import { usePrivacyStore } from "../store/usePrivacyStore";
 
 const IncomingCallModal = () => {
   const {
@@ -11,17 +13,32 @@ const IncomingCallModal = () => {
     rejectCall,
     callAccepted,
   } = useCallStore();
+  const protectScreenshots = usePrivacyStore((s) => s.protectScreenshots);
+
+  useEffect(() => {
+    if (!receivingCall || callAccepted || !protectScreenshots) return undefined;
+    document.body.classList.add("privacy-block-print");
+    return () => {
+      document.body.classList.remove("privacy-block-print");
+    };
+  }, [receivingCall, callAccepted, protectScreenshots]);
 
   if (!receivingCall || callAccepted) return null;
 
   const isVoice = callType === "voice";
 
   return (
-    <div className="fixed inset-0 z-[100] bg-zinc-950 text-white flex flex-col justify-between overflow-hidden select-none animate-in fade-in duration-200">
+    <div
+      className={`fixed inset-0 z-[100] bg-zinc-950 text-white flex flex-col justify-between overflow-hidden select-none animate-in fade-in duration-200 ${
+        protectScreenshots ? "privacy-protected-media" : ""
+      }`}
+      onContextMenu={(e) => protectScreenshots && e.preventDefault()}
+    >
       {/* Full-screen Darkened Caller Portrait */}
       <img
         src={callerAvatar || "/avatar.png"}
         alt={callerName}
+        draggable={!protectScreenshots}
         className="absolute inset-0 w-full h-full object-cover"
       />
       <div className="absolute inset-0 bg-black/55 backdrop-blur-[2px]" />

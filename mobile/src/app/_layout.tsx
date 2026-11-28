@@ -14,7 +14,9 @@ import { useCallStore } from '../store/useCallStore';
 import { useChatStore } from '../store/useChatStore';
 import { useFriendsStore } from '../store/useFriendsStore';
 import { useStickerStore } from '../store/useStickerStore';
+import { usePrivacyStore } from '../store/usePrivacyStore';
 import { useToastStore } from '../store/useToastStore';
+import { setScreenshotProtection } from '../lib/callAudio';
 import { setupCallNotificationListeners } from '../lib/notifications';
 import { IncomingCallModal } from '../components/call/IncomingCallModal';
 import { ActiveCallView } from '../components/call/ActiveCallView';
@@ -25,6 +27,8 @@ import { StickerImportModal } from '../components/ui/StickerImportModal';
 export default function RootLayout() {
   const { authUser, isCheckingAuth, checkAuth, socket } = useAuthStore();
   const { theme, loadTheme } = useThemeStore();
+  const { protectScreenshots, loadPrivacy } = usePrivacyStore();
+  const isCallActiveOrRinging = useCallStore((s) => s.callActive || s.receivingCall);
   const {
     initializeSocketListeners,
     uninitializeSocketListeners,
@@ -36,13 +40,21 @@ export default function RootLayout() {
   const segments = useSegments();
   const router = useRouter();
 
-  // Load theme, stickers, and check authentication, immediately dismissing native splash screen
+  // Load theme, privacy, stickers, and check authentication, immediately dismissing native splash screen
   useEffect(() => {
     loadTheme();
+    loadPrivacy();
     useStickerStore.getState().hydrateStickers();
     checkAuth();
     SplashScreen.hideAsync().catch(() => {});
   }, []);
+
+  // Enforce Android FLAG_SECURE only on Chat and Voice/Video Call screens when enabled in Settings -> Privacy
+  useEffect(() => {
+    const inChatScreen = (segments as string[])[0] === 'chat';
+    const shouldProtect = protectScreenshots && (inChatScreen || isCallActiveOrRinging);
+    setScreenshotProtection(shouldProtect);
+  }, [protectScreenshots, segments, isCallActiveOrRinging]);
 
   // Import WhatsApp sticker packs opened, shared (EXTRA_STREAM), or pushed via ENABLE_STICKER_PACK
   useEffect(() => {

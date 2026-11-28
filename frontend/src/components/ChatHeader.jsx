@@ -1,15 +1,18 @@
+import { createPortal } from "react-dom";
 import { ChevronLeft, EllipsisVertical, Phone, Video } from "lucide-react";
 import { useAuthStore } from "../store/useAuthStore";
 import { useChatStore } from "../store/useChatStore";
 import { useCallStore } from "../store/useCallStore";
 import { useEffect, useRef, useState } from "react";
 import VerticalMenu from "./VerticalMenu";
+import AlertDialogBox from "./AlertDialogBox";
 
-const ChatHeader = ({ setAlertOpen }) => {
+const ChatHeader = () => {
   const { selectedUser, setSelectedUser, typingUsers } = useChatStore();
   const { onlineUsers } = useAuthStore();
   const { callUser } = useCallStore();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState(null);
 
   const menuRef = useRef(null);
 
@@ -32,7 +35,7 @@ const ChatHeader = ({ setAlertOpen }) => {
   const isTyping = Boolean(typingUsers?.[selectedUser._id]);
 
   return (
-    <div className="relative px-3.5 py-2.5 border-b border-base-300/60 bg-base-100/95 backdrop-blur-sm max-sm:fixed max-sm:top-0 max-sm:left-0 max-sm:right-0 max-sm:z-40">
+    <div className="relative z-30 px-3.5 py-2.5 border-b border-base-300/60 bg-base-100/95 backdrop-blur-sm max-sm:fixed max-sm:top-0 max-sm:left-0 max-sm:right-0 max-sm:z-40">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
           <button
@@ -110,13 +113,41 @@ const ChatHeader = ({ setAlertOpen }) => {
             </button>
 
             {menuOpen && (
-              <div className="fixed flex right-[3.5rem] max-sm:right-[1.5rem] z-30">
-                <VerticalMenu setAlertOpen={setAlertOpen} />
+              <div className="absolute right-0 top-11 z-50">
+                <VerticalMenu
+                  onCloseMenu={() => setMenuOpen(false)}
+                  onOpenDialog={(dialog) => {
+                    setMenuOpen(false);
+                    setConfirmDialog(dialog);
+                  }}
+                />
               </div>
             )}
           </div>
         </div>
       </div>
+
+      {/* Render Confirmation Dialog in a top-level Portal so header backdrop-blur never traps fixed positioning */}
+      {confirmDialog &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/55 backdrop-blur-sm animate-in fade-in duration-150"
+            onClick={() => setConfirmDialog(null)}
+          >
+            <div onClick={(e) => e.stopPropagation()}>
+              <AlertDialogBox
+                setAlertOpen={(open) => {
+                  if (!open) setConfirmDialog(null);
+                }}
+                mainfunc={confirmDialog.mainfunc}
+                btnTxt={confirmDialog.btnTxt}
+                title={confirmDialog.title}
+                description={confirmDialog.description}
+              />
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 };

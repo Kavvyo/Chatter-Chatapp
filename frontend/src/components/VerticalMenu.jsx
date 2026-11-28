@@ -1,56 +1,74 @@
-import { useState } from "react";
-import { useChatStore } from "../store/useChatStore"
+import { Trash2, UserMinus, X } from "lucide-react";
+import { useChatStore } from "../store/useChatStore";
 import { useFriendsStore } from "../store/useFriendsStore";
-import AlertDialogBox from "./AlertDialogBox";
 
-function VerticalMenu() {
-    const{selectedUser, setSelectedUser, deleteAllMessages } = useChatStore();
-    const { unfriendUser } = useFriendsStore();
-    const [alertOpen, setAlertOpen ]= useState(false)
-    const [mainFunc, setMainFunc] = useState(() => () => {});
-    const [btnTxt, setBtnTxt] = useState("");
-    const [title, setTitle] = useState("");
-    const [description, setDescription] = useState("");
+function VerticalMenu({ onCloseMenu, onOpenDialog }) {
+  const { selectedUser, setSelectedUser, deleteAllMessages } = useChatStore();
+  const { unfriendUser } = useFriendsStore();
 
-    const handleUnfriend = () => {
-      setBtnTxt("Unfriend");
-      setTitle ("Do you really want to unfriend?");
-      setDescription("If you chose to unfriend, you have to request again to be a friend and exiting messages will be lost");
-      setAlertOpen(true);
-      setMainFunc(() => () => unfriendUser(selectedUser._id));
-    }
-    const handleDeleteCon = () => {
-      setBtnTxt("Delete Messages");
-      setTitle("Are you sure to delete the conversation?");
-      setDescription("Your messages will be deleted permenetly");
-      setAlertOpen(true);
-      setMainFunc(() => () => deleteAllMessages(selectedUser._id));
+  if (!selectedUser) return null;
 
-    }
+  const handleUnfriend = () => {
+    const targetId = selectedUser._id;
+    onOpenDialog?.({
+      btnTxt: "Unfriend",
+      title: "Unfriend this contact?",
+      description:
+        "If you unfriend, you will need to send a new friend request and existing messages will be removed.",
+      mainfunc: () => unfriendUser(targetId),
+    });
+  };
+
+  const handleDeleteCon = () => {
+    const targetId = selectedUser._id;
+    onOpenDialog?.({
+      btnTxt: "Delete Conversation",
+      title: "Delete conversation?",
+      description:
+        "All messages and stickers in this chat will be permanently cleared for both users.",
+      mainfunc: () => deleteAllMessages(targetId),
+    });
+  };
+
+  const handleCloseChat = () => {
+    onCloseMenu?.();
+    setSelectedUser(null);
+  };
 
   return (
-    <div>
-        <ul className="menu bg-base-200 rounded-box w-56 font-semibold border border-gray-500 border-opacity-40">
-            <li onClick={handleUnfriend}><a>Unfriend</a></li>
-            <li onClick={handleDeleteCon}><a>Delete conversation</a></li>
-            <li onClick={() => setSelectedUser(null)} className="max-sm:hidden"><a>Close Chat</a></li>
-        </ul>
-
-          
-           {alertOpen && 
-              <div className="fixed flex items-center justify-center min-h-[100%] min-w-[100%] top-0 right-0 backdrop-blur-[2px] bg-black bg-opacity-20">
-                <AlertDialogBox 
-                  setAlertOpen = {setAlertOpen} 
-                  mainfunc={mainFunc} 
-                  btnTxt = {btnTxt} 
-                  title ={title} 
-                  description= {description} 
-                />
-              </div>
-            }
-
-    </div>
-  )
+    <ul className="menu p-1.5 bg-base-200 rounded-2xl w-56 text-sm font-medium border border-base-300 shadow-xl">
+      <li>
+        <button
+          type="button"
+          onClick={handleDeleteCon}
+          className="flex items-center gap-2.5 text-error hover:bg-error/10 rounded-xl"
+        >
+          <Trash2 className="size-4" />
+          <span>Delete conversation</span>
+        </button>
+      </li>
+      <li>
+        <button
+          type="button"
+          onClick={handleUnfriend}
+          className="flex items-center gap-2.5 rounded-xl"
+        >
+          <UserMinus className="size-4" />
+          <span>Unfriend</span>
+        </button>
+      </li>
+      <li className="max-sm:hidden">
+        <button
+          type="button"
+          onClick={handleCloseChat}
+          className="flex items-center gap-2.5 rounded-xl"
+        >
+          <X className="size-4" />
+          <span>Close Chat</span>
+        </button>
+      </li>
+    </ul>
+  );
 }
 
-export default VerticalMenu
+export default VerticalMenu;

@@ -49,6 +49,16 @@ export interface ChatUser {
 
 const INITIAL_PAGE_LIMIT = 50;
 
+function toLocalCutoffIso(serverClearedAtIso?: string | null, serverNowIso?: string | null): string | null {
+  if (!serverClearedAtIso) return null;
+  const serverClearMs = new Date(serverClearedAtIso).getTime();
+  if (Number.isNaN(serverClearMs)) return null;
+  const offsetMs = serverNowIso
+    ? Date.now() - new Date(serverNowIso).getTime()
+    : 0;
+  return new Date(serverClearMs + (Number.isNaN(offsetMs) ? 0 : offsetMs)).toISOString();
+}
+
 function pruneMessagesBefore(
   list: Message[],
   clearedAtIso?: string | null,
@@ -65,7 +75,8 @@ function pruneMessagesBefore(
   return list.filter((m) => {
     if (m._id.startsWith('temp_')) return true;
     if (preserveLocalOnly && m.localOnly) return true;
-    return new Date(m.createdAt).getTime() > cutoffMs;
+    const itemMs = m.clientCreatedAt || new Date(m.createdAt).getTime();
+    return !Number.isNaN(itemMs) && itemMs > cutoffMs;
   });
 }
 
@@ -390,15 +401,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         const payload = res.data as
           | Message[]
-          | { messages: Message[]; clearedAt?: string | null; serverCount?: number };
+          | { messages: Message[]; clearedAt?: string | null; serverCount?: number; serverNow?: string };
         const delta = Array.isArray(payload) ? payload : payload.messages || [];
         const clearedAt = Array.isArray(payload) ? null : payload.clearedAt || null;
         const serverCount = Array.isArray(payload) ? undefined : payload.serverCount;
+        const serverNow = Array.isArray(payload) ? null : payload.serverNow || null;
 
         const latestList = get().messagesByUser[peerId] || cached;
         let prunedBase = latestList;
         if (clearedAt) {
-          prunedBase = pruneMessagesBefore(latestList, clearedAt, false);
+          const localCutoff = toLocalCutoffIso(clearedAt, serverNow) || clearedAt;
+          prunedBase = pruneMessagesBefore(latestList, localCutoff, false);
         } else if (serverCount === 0) {
           // Only prune server-synced items; preserve already-downloaded P2P local stickers
           prunedBase = pruneMessagesBefore(latestList, null, true);
@@ -1001,7 +1014,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       'conversationCleared',
       async ({ peerId, clearedAt }: { peerId: string; clearedAt?: string }) => {
         if (!peerId) return;
-        await applyConversationClear(peerId.toString(), clearedAt, get, set, true);
+        const pId = peerId.toString();
+        const serverMs = clearedAt ? new Date(clearedAt).getTime() : NaN;
+        const effectiveCutoffIso = new Date(
+          Number.isNaN(serverMs) ? Date.now() : Math.max(serverMs, Date.now())
+        ).toISOString();
+
+        const myId = useAuthStore.getState().authUser?._id;
+        if (myId) {
+          const outbox = await getPendingStickerOutbox(myId);
+          const filtered = outbox.filter((x) => x.peerId.toString() !== pId);
+          if (filtered.length !== outbox.length) {
+            await setPendingStickerOutbox(myId, filtered);
+          }
+        }
+        await applyConversationClear(pId, effectiveCutoffIso, get, set, true);
       }
     );
 
@@ -1217,7 +1244,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         unreadCounts: nextUnread,
       };
     });
-    if (myId) setCachedMessages(myId, userId, []);
+    if (myId) {
+      setCachedMessages(myId, userId, []);
+      const outbox = await getPendingStickerOutbox(myId);
+      const filtered = outbox.filter((x) => x.peerId.toString() !== userId.toString());
+      if (filtered.length !== outbox.length) {
+        await setPendingStickerOutbox(myId, filtered);
+      }
+    }
 
     try {
       await axiosInstance.delete(`/messages/deleteAll/${userId}`);
@@ -1234,10 +1268,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
       const payload = res.data as
         | Array<{ _id: string; count: number }>
-        | { counts: Array<{ _id: string; count: number }>; clears?: Record<string, string> };
+        | {
+            counts: Array<{ _id: string; count: number }>;
+            clears?: Record<string, string>;
+            serverNow?: string;
+          };
 
       const countsList = Array.isArray(payload) ? payload : payload.counts || [];
       const clears = Array.isArray(payload) ? {} : payload.clears || {};
+      const serverNow = Array.isArray(payload) ? null : payload.serverNow || null;
 
       const countMap: Record<string, number> = {};
       countsList.forEach((item) => {
@@ -1249,7 +1288,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (clears) {
         for (const [peerId, clearedAt] of Object.entries(clears)) {
           if (clearedAt) {
-            await applyConversationClear(peerId, clearedAt, get, set);
+            const localCutoff = toLocalCutoffIso(clearedAt, serverNow) || clearedAt;
+            await applyConversationClear(peerId, localCutoff, get, set);
           }
         }
       }

@@ -149,12 +149,15 @@ export const useCallStore = create((set, get) => ({
 
     socket.on("callAccepted", () => {
       stopCallSounds();
-      const { callTimeoutId } = get();
+      const { callTimeoutId, callStatus } = get();
       if (callTimeoutId) {
         clearTimeout(callTimeoutId);
       }
-      set({ callAccepted: true, callStatus: "connected", callTimeoutId: null });
-      get().startDurationTimer();
+      set({
+        callAccepted: true,
+        callStatus: callStatus === "connected" ? "connected" : "connecting",
+        callTimeoutId: null,
+      });
     });
 
     socket.on("callEnded", () => {
@@ -228,55 +231,108 @@ export const useCallStore = create((set, get) => ({
   connectToLiveKitRoom: async (roomName, callType, authPromise = null) => {
     const isVideo = callType === "video";
 
-    // Task A: Start local mic + camera capture IMMEDIATELY (don't wait for network)
-    const captureMediaPromise = (async () => {
-      let tracks = [];
+    // Task A: Start local microphone IMMEDIATELY (hardware webcam won't block voice audio)
+    const audioCapturePromise = (async () => {
       try {
-        tracks = await createLocalTracks({
-          audio: true,
-          video: isVideo
-            ? {
-                facingMode: "user",
-                resolution: VideoPresets.h540.resolution,
-              }
-            : false,
-        });
+        const audioTracks = await createLocalTracks({ audio: true, video: false });
+        const micTrack = audioTracks.find((t) => t.kind === Track.Kind.Audio) || null;
+        if (!get().callActive || get().roomName !== roomName) {
+          audioTracks.forEach((t) => t.stop());
+          return null;
+        }
+        if (micTrack) {
+          set((s) => ({
+            pendingTracks: [...s.pendingTracks, micTrack],
+            isMicMuted: false,
+          }));
+        }
+        return micTrack;
       } catch (err) {
-        if (isVideo) {
-          console.warn("Video+Audio capture failed, falling back to audio only:", err);
-          try {
-            tracks = await createLocalTracks({ audio: true, video: false });
-            set({ isCameraOff: true });
-            toast.error("Could not access camera — continuing with audio only");
-          } catch (audioErr) {
-            console.error("Audio capture failed:", audioErr);
-            set({ isMicMuted: true, isCameraOff: true });
-            toast.error("Could not access microphone");
-            return [];
-          }
-        } else {
-          console.error("Audio capture failed:", err);
-          set({ isMicMuted: true });
-          toast.error("Could not access microphone");
-          return [];
+        console.error("Audio capture failed:", err);
+        set({ isMicMuted: true });
+        toast.error("Could not access microphone");
+        return null;
+      }
+    })();
+
+    const videoCapturePromise = (async () => {
+      if (!isVideo) {
+        set({ isCameraOff: true });
+        return null;
+      }
+      try {
+        const videoTracks = await createLocalTracks({
+          audio: false,
+          video: {
+            facingMode: "user",
+            resolution: VideoPresets.h540.resolution,
+          },
+        });
+        const camTrack = videoTracks.find((t) => t.kind === Track.Kind.Video) || null;
+        if (!get().callActive || get().roomName !== roomName) {
+          videoTracks.forEach((t) => t.stop());
+          return null;
+        }
+        if (camTrack) {
+          set((s) => ({
+            pendingTracks: [...s.pendingTracks, camTrack],
+            localVideoTrack: camTrack,
+            isCameraOff: false,
+          }));
+        }
+        return camTrack;
+      } catch (err) {
+        console.warn("Camera capture failed, continuing with audio only:", err);
+        set({ isCameraOff: true });
+        toast.error("Could not access camera — continuing with audio only");
+        return null;
+      }
+    })();
+
+    let localAudioSettled = false;
+    let remoteMediaReady = false;
+    let mutedFallbackTimer = null;
+
+    const markConnectedIfReady = (roomRef) => {
+      if (!get().callActive || get().roomName !== roomName) return;
+      if (get().callStatus === "connected") return;
+
+      const finishConnect = () => {
+        if (mutedFallbackTimer) {
+          clearTimeout(mutedFallbackTimer);
+          mutedFallbackTimer = null;
+        }
+        stopCallSounds();
+        const { callTimeoutId } = get();
+        if (callTimeoutId) clearTimeout(callTimeoutId);
+        set({ callStatus: "connected", callAccepted: true, callTimeoutId: null });
+        get().startDurationTimer();
+      };
+
+      if (remoteMediaReady) {
+        finishConnect();
+        return;
+      }
+
+      if (roomRef?.remoteParticipants?.size > 0) {
+        if (localAudioSettled) {
+          finishConnect();
+          return;
+        }
+        if (!mutedFallbackTimer) {
+          mutedFallbackTimer = setTimeout(() => {
+            if (
+              get().callActive &&
+              get().roomName === roomName &&
+              get().callStatus !== "connected" &&
+              roomRef.remoteParticipants.size > 0
+            ) {
+              finishConnect();
+            }
+          }, 650);
         }
       }
-
-      if (!get().callActive || get().roomName !== roomName) {
-        tracks.forEach((t) => t.stop());
-        return [];
-      }
-
-      const videoTrack = tracks.find((t) => t.kind === Track.Kind.Video) || null;
-      set({
-        pendingTracks: tracks,
-        localVideoTrack: videoTrack,
-        isCameraOff: !videoTrack,
-        isMicMuted: !tracks.some((t) => t.kind === Track.Kind.Audio),
-      });
-
-      return tracks;
-    })();
+    };
 
     // Task B: Resolve token (from Socket ack / pre-warmed cache / HTTP fallback) & connect SFU
     const connectRoomPromise = (async () => {
@@ -324,20 +380,19 @@ export const useCallStore = create((set, get) => ({
             remoteVideoTrack: track,
             remoteVideoMuted: track.isMuted,
             callType: "video",
-            callStatus: "connected",
-            callAccepted: true,
             callTimeoutId: null,
           });
+          remoteMediaReady = true;
+          markConnectedIfReady(room);
         } else if (track.kind === Track.Kind.Audio) {
           set({
             remoteAudioTrack: track,
             remoteAudioMuted: track.isMuted,
-            callStatus: "connected",
-            callAccepted: true,
             callTimeoutId: null,
           });
+          remoteMediaReady = true;
+          markConnectedIfReady(room);
         }
-        get().startDurationTimer();
       };
 
       room.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
@@ -383,11 +438,7 @@ export const useCallStore = create((set, get) => ({
       });
 
       room.on(RoomEvent.ParticipantConnected, () => {
-        stopCallSounds();
-        const { callTimeoutId } = get();
-        if (callTimeoutId) clearTimeout(callTimeoutId);
-        set({ callStatus: "connected", callAccepted: true, callTimeoutId: null });
-        get().startDurationTimer();
+        markConnectedIfReady(room);
       });
 
       room.on(RoomEvent.ParticipantDisconnected, () => {
@@ -402,11 +453,16 @@ export const useCallStore = create((set, get) => ({
       });
 
       room.on(RoomEvent.Disconnected, () => {
+        if (mutedFallbackTimer) {
+          clearTimeout(mutedFallbackTimer);
+          mutedFallbackTimer = null;
+        }
         if (get().room === room && get().callActive) {
           get().leaveCall(false);
         }
       });
 
+      room.startAudio().catch(() => {});
       await room.connect(url, token);
 
       if (!get().callActive || get().roomName !== roomName) {
@@ -415,20 +471,10 @@ export const useCallStore = create((set, get) => ({
         return null;
       }
 
-      try {
-        await room.startAudio();
-      } catch {
-        // Handled by AudioPlaybackStatusChanged
-      }
-
+      room.startAudio().catch(() => {});
       set({ room, audioBlocked: !room.canPlaybackAudio });
 
-      // Subscribe immediately to anyone already in the room
       if (room.remoteParticipants.size > 0) {
-        stopCallSounds();
-        set({ callStatus: "connected", callAccepted: true });
-        get().startDurationTimer();
-
         room.remoteParticipants.forEach((participant) => {
           participant.trackPublications.forEach((pub) => {
             if (pub.isSubscribed && pub.track) {
@@ -436,35 +482,57 @@ export const useCallStore = create((set, get) => ({
             }
           });
         });
+        markConnectedIfReady(room);
       }
 
       return room;
     })();
 
-    const [room, tracks] = await Promise.all([
+    const [room, micTrack] = await Promise.all([
       connectRoomPromise,
-      captureMediaPromise,
+      audioCapturePromise,
     ]);
 
     if (!room || !get().callActive || get().roomName !== roomName) {
-      tracks.forEach((t) => t.stop());
+      if (micTrack) micTrack.stop();
       return null;
     }
 
-    // Publish audio & video tracks in parallel with low-latency settings
-    await Promise.allSettled(
-      tracks.map((track) =>
-        room.localParticipant.publishTrack(track, {
-          source:
-            track.kind === Track.Kind.Video
-              ? Track.Source.Camera
-              : Track.Source.Microphone,
+    if (micTrack) {
+      await room.localParticipant
+        .publishTrack(micTrack, {
+          source: Track.Source.Microphone,
           simulcast: false,
         })
-      )
-    );
+        .catch(() => {});
+    }
 
-    set({ pendingTracks: [] });
+    localAudioSettled = true;
+    markConnectedIfReady(room);
+
+    // Publish camera independently without delaying voice audio
+    videoCapturePromise.then(async (camTrack) => {
+      if (!camTrack || !get().callActive || get().roomName !== roomName) {
+        if (camTrack) camTrack.stop();
+        return;
+      }
+      await room.localParticipant
+        .publishTrack(camTrack, {
+          source: Track.Source.Camera,
+          simulcast: false,
+        })
+        .catch(() => {});
+      set((s) => ({
+        pendingTracks: s.pendingTracks.filter((t) => t !== micTrack && t !== camTrack),
+      }));
+    });
+
+    if (!isVideo) {
+      set((s) => ({
+        pendingTracks: s.pendingTracks.filter((t) => t !== micTrack),
+      }));
+    }
+
     return room;
   },
 
@@ -560,13 +628,12 @@ export const useCallStore = create((set, get) => ({
       callAccepted: true,
       callActive: true,
       receivingCall: false,
-      callStatus: "connected",
+      callStatus: "connecting",
       callDuration: 0,
       isCaller: false,
     });
 
     socket.emit("answerCall", { to: caller, roomName });
-    get().startDurationTimer();
 
     try {
       await get().connectToLiveKitRoom(roomName, callType || "video");

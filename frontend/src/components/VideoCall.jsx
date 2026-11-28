@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useCallStore } from "../store/useCallStore";
+import { usePrivacyStore } from "../store/usePrivacyStore";
 
 function formatDuration(seconds) {
   const mins = Math.floor(seconds / 60);
@@ -43,6 +44,15 @@ function VideoCall() {
 
   const [isSwapped, setIsSwapped] = useState(false);
   const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
+  const protectScreenshots = usePrivacyStore((s) => s.protectScreenshots);
+
+  useEffect(() => {
+    if (!protectScreenshots) return undefined;
+    document.body.classList.add("privacy-block-print");
+    return () => {
+      document.body.classList.remove("privacy-block-print");
+    };
+  }, [protectScreenshots]);
 
   const mainVideoRef = useRef(null);
   const pipVideoRef = useRef(null);
@@ -118,7 +128,12 @@ function VideoCall() {
     : "Connecting...";
 
   return (
-    <div className="fixed inset-0 z-50 bg-zinc-950 text-white overflow-hidden select-none animate-in fade-in duration-200">
+    <div
+      className={`fixed inset-0 z-50 bg-zinc-950 text-white overflow-hidden select-none animate-in fade-in duration-200 ${
+        protectScreenshots ? "privacy-protected-media" : ""
+      }`}
+      onContextMenu={(e) => protectScreenshots && e.preventDefault()}
+    >
       <audio ref={remoteAudioRef} autoPlay playsInline muted={isSpeakerMuted} />
 
       {/* Background Layer */}
@@ -128,6 +143,8 @@ function VideoCall() {
           autoPlay
           playsInline
           muted={mainIsLocal}
+          disablePictureInPicture={protectScreenshots}
+          controlsList="nodownload"
           className={`absolute inset-0 w-full h-full object-cover ${
             mainIsLocal && facingMode === "user" ? "-scale-x-100" : "scale-x-100"
           }`}
@@ -137,6 +154,7 @@ function VideoCall() {
           <img
             src={participantAvatar}
             alt={participantName}
+            draggable={!protectScreenshots}
             className="absolute inset-0 w-full h-full object-cover"
           />
           <div className="absolute inset-0 bg-black/50 backdrop-blur-[1px]" />
@@ -206,6 +224,8 @@ function VideoCall() {
               autoPlay
               playsInline
               muted={!mainIsLocal}
+              disablePictureInPicture={protectScreenshots}
+              controlsList="nodownload"
               className={`w-full h-full object-cover ${
                 !mainIsLocal && facingMode === "user" ? "-scale-x-100" : "scale-x-100"
               }`}
@@ -216,6 +236,7 @@ function VideoCall() {
                 <img
                   src={participantAvatar}
                   alt={participantName}
+                  draggable={!protectScreenshots}
                   className="w-full h-full object-cover opacity-60"
                 />
               ) : (

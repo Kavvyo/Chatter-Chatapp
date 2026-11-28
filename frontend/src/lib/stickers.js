@@ -542,6 +542,28 @@ export async function clearLocalStickerMessages(myId, peerId) {
   }
 }
 
+export async function pruneLocalStickerMessagesBefore(myId, peerId, cutoffMs) {
+  if (!myId || !peerId) return;
+  if (!cutoffMs || Number.isNaN(cutoffMs)) {
+    return clearLocalStickerMessages(myId, peerId);
+  }
+  try {
+    const db = await openStickerDb();
+    const tx = db.transaction(STORE_MESSAGES, "readwrite");
+    const store = tx.objectStore(STORE_MESSAGES);
+    const records = (await idbRequest(store.index("by_chatKey").getAll(`${myId}:${peerId}`))) || [];
+    for (const rec of records) {
+      const msgTime = rec.clientCreatedAt || new Date(rec.createdAt || 0).getTime();
+      if (!Number.isNaN(msgTime) && msgTime <= cutoffMs) {
+        store.delete(rec.key);
+      }
+    }
+    await idbTxComplete(tx);
+  } catch {
+    // Ignore
+  }
+}
+
 export async function getStickerOutbox(myId) {
   if (!myId) return [];
   try {

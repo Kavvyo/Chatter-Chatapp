@@ -379,9 +379,12 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
 
       var activeRoom = null;
       var activeSessionKey = null;
+      var preparedRoom = null;
+      var preparedKey = null;
       var pendingTracks = [];
       var localVideoTrack = null;
       var remoteVideoTrack = null;
+      var attachedAudioTrackId = null;
       var isDisconnecting = false;
       var isSwitchingCamera = false;
       var currentCallType = 'video';
@@ -585,6 +588,16 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
       function stopLocalMediaAndRoom() {
         isDisconnecting = true;
         activeSessionKey = null;
+        attachedAudioTrackId = null;
+
+        if (preparedRoom) {
+          try {
+            preparedRoom.removeAllListeners();
+            preparedRoom.disconnect(true);
+          } catch (e) {}
+          preparedRoom = null;
+          preparedKey = null;
+        }
 
         if (pendingTracks.length > 0) {
           pendingTracks.forEach(function (t) {
@@ -626,7 +639,48 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
         }
       }
 
+      function createOptimizedRoom(LK, facing) {
+        return new LK.Room({
+          adaptiveStream: false,
+          dynacast: false,
+          videoCaptureDefaults: {
+            resolution: LK.VideoPresets.h540.resolution,
+            facingMode: facing || 'user',
+          },
+          publishDefaults: {
+            simulcast: false,
+            dtx: true,
+            red: true,
+            videoCodec: 'vp8',
+            videoEncoding: {
+              maxBitrate: 900000,
+              maxFramerate: 30,
+            },
+          },
+        });
+      }
+
       window.__CALL_BRIDGE__ = {
+        prepare: function (url, token, facingMode) {
+          if (!window.LivekitClient || !url || !token || activeRoom) return;
+          var key = String(url) + ':' + String(token);
+          if (preparedKey === key && preparedRoom) return;
+
+          if (preparedRoom) {
+            try { preparedRoom.disconnect(true); } catch (e) {}
+            preparedRoom = null;
+          }
+
+          try {
+            var r = createOptimizedRoom(window.LivekitClient, facingMode || 'user');
+            preparedRoom = r;
+            preparedKey = key;
+            if (typeof r.prepareConnection === 'function') {
+              r.prepareConnection(url, token).catch(function () {});
+            }
+          } catch (e) {}
+        },
+
         connect: async function (config) {
           if (!window.LivekitClient) {
             post('ERROR', { message: 'LiveKit SDK not loaded yet' });
@@ -642,12 +696,22 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
             return;
           }
 
+          // Preserve preparedRoom only if it matches this exact URL & token before cleanup
+          var reusePrepared = null;
+          var targetPrepKey = String(config.url) + ':' + String(config.token);
+          if (preparedRoom && preparedKey === targetPrepKey) {
+            reusePrepared = preparedRoom;
+            preparedRoom = null;
+            preparedKey = null;
+          }
+
           if (activeRoom) {
             stopLocalMediaAndRoom();
           }
 
           isDisconnecting = false;
           activeSessionKey = sessionKey;
+          attachedAudioTrackId = null;
           currentCallType = config.callType || 'video';
           currentFacing = config.facingMode || 'user';
           currentCameraOff = Boolean(config.isCameraOff);
@@ -657,110 +721,125 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
           syncVideoLayout();
 
           var LK = window.LivekitClient;
-          var Room = LK.Room;
           var RoomEvent = LK.RoomEvent;
           var Track = LK.Track;
           var VideoPresets = LK.VideoPresets;
 
           var shouldCaptureVideo = currentCallType === 'video' && !currentCameraOff;
+          var audioConstraints = currentMicMuted
+            ? false
+            : { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
 
-          var capturePromise = (async function () {
-            var tracks = [];
-            var audioConstraints = currentMicMuted
-              ? false
-              : { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
-            var videoConstraints = shouldCaptureVideo
-              ? { facingMode: currentFacing, resolution: VideoPresets.h540.resolution }
-              : false;
+          var localAudioSettled = currentMicMuted;
+          var remoteMediaSubscribed = false;
+          var mediaConnectedNotified = false;
+          var mutedFallbackTimer = null;
 
-            if (!audioConstraints && !videoConstraints) {
-              return [];
+          function notifyConnectedOnce() {
+            if (mediaConnectedNotified || isDisconnecting || activeSessionKey !== sessionKey) return;
+            mediaConnectedNotified = true;
+            if (mutedFallbackTimer) {
+              clearTimeout(mutedFallbackTimer);
+              mutedFallbackTimer = null;
             }
+            post('PARTICIPANT_CONNECTED', {});
+          }
 
-            try {
-              tracks = await LK.createLocalTracks({
-                audio: audioConstraints,
-                video: videoConstraints,
-              });
-            } catch (err) {
-              var errMsg = err && err.name ? (err.name + ': ' + err.message) : String(err);
-              log('warn', 'Primary media capture failed: ' + errMsg);
-              if (videoConstraints && audioConstraints) {
-                try {
-                  tracks = await LK.createLocalTracks({ audio: true, video: false });
-                  currentCameraOff = true;
-                  post('ERROR', { message: 'Camera unavailable (' + (err && err.name ? err.name : 'error') + ') — audio only' });
-                } catch (audioErr) {
-                  var audMsg = audioErr && audioErr.name ? (audioErr.name + ': ' + audioErr.message) : String(audioErr);
-                  log('error', 'Audio capture failed: ' + audMsg);
-                  currentMicMuted = true;
-                  currentCameraOff = true;
-                  post('ERROR', { message: 'Microphone access failed (' + audMsg + ')' });
-                  tracks = [];
-                }
-              } else if (audioConstraints) {
-                try {
-                  tracks = await LK.createLocalTracks({ audio: true, video: false });
-                } catch (plainErr) {
-                  var pMsg = plainErr && plainErr.name ? (plainErr.name + ': ' + plainErr.message) : String(plainErr);
-                  log('error', 'Plain audio capture failed: ' + pMsg);
-                  currentMicMuted = true;
-                  currentCameraOff = true;
-                  post('ERROR', { message: 'Microphone access failed (' + pMsg + ')' });
-                  tracks = [];
-                }
-              } else {
-                if (videoConstraints) currentCameraOff = true;
-                post('ERROR', { message: 'Media capture failed (' + errMsg + ')' });
-                tracks = [];
+          function checkMediaReady(roomRef) {
+            if (mediaConnectedNotified || isDisconnecting || activeSessionKey !== sessionKey) return;
+            if (remoteMediaSubscribed) {
+              notifyConnectedOnce();
+              return;
+            }
+            if (roomRef && roomRef.remoteParticipants && roomRef.remoteParticipants.size > 0) {
+              if (localAudioSettled) {
+                notifyConnectedOnce();
+                return;
+              }
+              if (!mutedFallbackTimer) {
+                mutedFallbackTimer = setTimeout(function () {
+                  if (!mediaConnectedNotified && activeRoom === roomRef && roomRef.remoteParticipants.size > 0) {
+                    notifyConnectedOnce();
+                  }
+                }, 650);
               }
             }
+          }
 
-            if (isDisconnecting || activeSessionKey !== sessionKey) {
-              tracks.forEach(function (t) { try { t.stop(); } catch (e) {} });
-              return [];
+          // Capture microphone IMMEDIATELY without blocking on camera hardware initialization
+          var audioCapturePromise = (async function () {
+            if (!audioConstraints) {
+              post('LOCAL_MEDIA_STATE', { hasAudio: false, micMuted: true });
+              return null;
             }
+            var track = null;
+            try {
+              var tracks = await LK.createLocalTracks({ audio: audioConstraints, video: false });
+              track = tracks.find(function (t) { return t.kind === Track.Kind.Audio; }) || null;
+            } catch (err) {
+              try {
+                var fallback = await LK.createLocalTracks({ audio: true, video: false });
+                track = fallback.find(function (t) { return t.kind === Track.Kind.Audio; }) || null;
+              } catch (plainErr) {
+                var pMsg = plainErr && plainErr.name ? (plainErr.name + ': ' + plainErr.message) : String(plainErr);
+                log('error', 'Audio capture failed: ' + pMsg);
+                currentMicMuted = true;
+                post('ERROR', { message: 'Microphone access failed (' + pMsg + ')' });
+              }
+            }
+            if (track && (isDisconnecting || activeSessionKey !== sessionKey)) {
+              try { track.stop(); } catch (e) {}
+              return null;
+            }
+            if (track) pendingTracks.push(track);
+            post('LOCAL_MEDIA_STATE', {
+              hasAudio: Boolean(track),
+              micMuted: currentMicMuted || !track,
+            });
+            return track;
+          })();
 
-            pendingTracks = tracks;
-            var vidTrack = tracks.find(function (t) { return t.kind === Track.Kind.Video; }) || null;
-            var hasAud = tracks.some(function (t) { return t.kind === Track.Kind.Audio; });
+          // Capture camera concurrently so hardware camera warm-up never delays voice audio
+          var videoCapturePromise = (async function () {
+            if (!shouldCaptureVideo) {
+              currentCameraOff = true;
+              syncVideoLayout();
+              post('LOCAL_MEDIA_STATE', { hasVideo: false, cameraOff: true, facingMode: currentFacing });
+              return null;
+            }
+            var vidTrack = null;
+            try {
+              var vTracks = await LK.createLocalTracks({
+                audio: false,
+                video: { facingMode: currentFacing, resolution: VideoPresets.h540.resolution },
+              });
+              vidTrack = vTracks.find(function (t) { return t.kind === Track.Kind.Video; }) || null;
+            } catch (err) {
+              var errMsg = err && err.name ? (err.name + ': ' + err.message) : String(err);
+              log('warn', 'Video capture failed: ' + errMsg);
+              currentCameraOff = true;
+            }
+            if (vidTrack && (isDisconnecting || activeSessionKey !== sessionKey)) {
+              try { vidTrack.stop(); } catch (e) {}
+              return null;
+            }
             if (vidTrack) {
+              pendingTracks.push(vidTrack);
               attachLocalVideo(vidTrack);
             } else {
               currentCameraOff = true;
               syncVideoLayout();
             }
-
             post('LOCAL_MEDIA_STATE', {
               hasVideo: Boolean(vidTrack),
-              hasAudio: hasAud,
               cameraOff: !vidTrack,
-              micMuted: currentMicMuted || !hasAud,
               facingMode: currentFacing,
             });
-
-            return tracks;
+            return vidTrack;
           })();
 
           var roomPromise = (async function () {
-            var room = new Room({
-              adaptiveStream: false,
-              dynacast: false,
-              videoCaptureDefaults: {
-                resolution: VideoPresets.h540.resolution,
-                facingMode: currentFacing,
-              },
-              publishDefaults: {
-                simulcast: false,
-                dtx: true,
-                red: true,
-                videoCodec: 'vp8',
-                videoEncoding: {
-                  maxBitrate: 900000,
-                  maxFramerate: 30,
-                },
-              },
-            });
+            var room = reusePrepared || createOptimizedRoom(LK, currentFacing);
 
             function handleTrackSubscribed(track) {
               if (isDisconnecting || activeRoom !== room) return;
@@ -769,15 +848,27 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
                 currentRemoteMuted = Boolean(track.isMuted);
                 attachRemoteVideo(track);
                 post('REMOTE_VIDEO_STATE', { hasVideo: true, muted: currentRemoteMuted });
-                post('PARTICIPANT_CONNECTED', {});
+                remoteMediaSubscribed = true;
+                checkMediaReady(room);
               } else if (track.kind === Track.Kind.Audio) {
-                try { track.attach(remoteAudioEl); } catch (e) {}
+                var tid = track.sid || (track.mediaStreamTrack && track.mediaStreamTrack.id) || 'audio';
+                if (attachedAudioTrackId !== tid) {
+                  attachedAudioTrackId = tid;
+                  try { track.attach(remoteAudioEl); } catch (e) {}
+                }
+                remoteAudioEl.muted = false;
+                remoteAudioEl.volume = 1.0;
+                remoteAudioEl.onplaying = function () {
+                  remoteMediaSubscribed = true;
+                  checkMediaReady(room);
+                };
                 remoteAudioEl.play().catch(function () {
                   audioUnlockBtnEl.style.display = 'flex';
                   post('AUDIO_PLAYBACK_BLOCKED', { blocked: true });
                 });
                 post('REMOTE_AUDIO_STATE', { hasAudio: true, muted: Boolean(track.isMuted) });
-                post('PARTICIPANT_CONNECTED', {});
+                remoteMediaSubscribed = true;
+                checkMediaReady(room);
               }
             }
 
@@ -790,6 +881,7 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
                 attachRemoteVideo(null);
                 post('REMOTE_VIDEO_STATE', { hasVideo: false, muted: false });
               } else if (track.kind === Track.Kind.Audio) {
+                attachedAudioTrackId = null;
                 post('REMOTE_AUDIO_STATE', { hasAudio: false, muted: false });
               }
             });
@@ -837,7 +929,7 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
             });
 
             room.on(RoomEvent.ParticipantConnected, function () {
-              post('PARTICIPANT_CONNECTED', {});
+              checkMediaReady(room);
             });
 
             room.on(RoomEvent.ParticipantDisconnected, function () {
@@ -853,12 +945,41 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
             });
 
             room.on(RoomEvent.Disconnected, function () {
+              if (mutedFallbackTimer) {
+                clearTimeout(mutedFallbackTimer);
+                mutedFallbackTimer = null;
+              }
               if (!isDisconnecting && activeRoom === room) {
                 post('ROOM_DISCONNECTED', {});
               }
             });
 
+            var publishedEarlyAudio = false;
+            var publishPromiseEarly = null;
+
+            room.on(RoomEvent.SignalConnected, function () {
+              // Publish microphone as soon as WebSocket signals join so audio negotiates without extra round-trip
+              publishPromiseEarly = audioCapturePromise.then(function (track) {
+                if (!track || publishedEarlyAudio || isDisconnecting || activeRoom !== room) return null;
+                publishedEarlyAudio = true;
+                return room.localParticipant
+                  .publishTrack(track, {
+                    source: Track.Source.Microphone,
+                    simulcast: false,
+                  })
+                  .then(function () {
+                    pendingTracks = pendingTracks.filter(function (t) { return t !== track; });
+                    localAudioSettled = true;
+                    checkMediaReady(room);
+                  })
+                  .catch(function () {
+                    publishedEarlyAudio = false;
+                  });
+              });
+            });
+
             activeRoom = room;
+            room.startAudio().catch(function () {});
             await room.connect(config.url, config.token);
 
             if (isDisconnecting || activeSessionKey !== sessionKey) {
@@ -869,17 +990,17 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
               return null;
             }
 
-            try {
-              await room.startAudio();
-            } catch (e) {}
+            if (publishPromiseEarly) {
+              await publishPromiseEarly.catch(function () {});
+            }
 
+            room.startAudio().catch(function () {});
             var blocked = !room.canPlaybackAudio;
             audioUnlockBtnEl.style.display = blocked ? 'flex' : 'none';
             post('AUDIO_PLAYBACK_BLOCKED', { blocked: blocked });
             post('ROOM_CONNECTED', {});
 
             if (room.remoteParticipants.size > 0) {
-              post('PARTICIPANT_CONNECTED', {});
               room.remoteParticipants.forEach(function (participant) {
                 participant.trackPublications.forEach(function (pub) {
                   if (pub.isSubscribed && pub.track) {
@@ -887,37 +1008,48 @@ export const BRIDGE_HTML = `<!DOCTYPE html>
                   }
                 });
               });
+              checkMediaReady(room);
             }
 
             return room;
           })();
 
           try {
-            var results = await Promise.all([roomPromise, capturePromise]);
-            var connectedRoom = results[0];
-            var capturedTracks = results[1];
+            // Publish voice audio as soon as room & mic are ready — zero waiting for camera
+            var audioAndRoom = await Promise.all([roomPromise, audioCapturePromise]);
+            var connectedRoom = audioAndRoom[0];
+            var audioTrack = audioAndRoom[1];
 
             if (!connectedRoom || isDisconnecting || activeSessionKey !== sessionKey) {
-              capturedTracks.forEach(function (t) { try { t.stop(); } catch (e) {} });
+              if (audioTrack) { try { audioTrack.stop(); } catch (e) {} }
               return;
             }
 
-            await Promise.allSettled(
-              capturedTracks.map(function (track) {
-                return connectedRoom.localParticipant.publishTrack(track, {
-                  source: track.kind === Track.Kind.Video ? Track.Source.Camera : Track.Source.Microphone,
-                  simulcast: false,
-                });
-              })
-            );
-            pendingTracks = [];
-
-            if (currentMicMuted) {
+            if (audioTrack && !localAudioSettled) {
+              await connectedRoom.localParticipant.publishTrack(audioTrack, {
+                source: Track.Source.Microphone,
+                simulcast: false,
+              }).catch(function () {});
+              pendingTracks = pendingTracks.filter(function (t) { return t !== audioTrack; });
+            } else if (currentMicMuted) {
               await connectedRoom.localParticipant.setMicrophoneEnabled(false).catch(function () {});
             }
-            if (currentCameraOff) {
-              await connectedRoom.localParticipant.setCameraEnabled(false).catch(function () {});
-            }
+
+            localAudioSettled = true;
+            checkMediaReady(connectedRoom);
+
+            // Publish video track independently once camera hardware initializes
+            videoCapturePromise.then(async function (vidTrack) {
+              if (!vidTrack || isDisconnecting || activeSessionKey !== sessionKey || activeRoom !== connectedRoom) {
+                if (vidTrack) { try { vidTrack.stop(); } catch (e) {} }
+                return;
+              }
+              await connectedRoom.localParticipant.publishTrack(vidTrack, {
+                source: Track.Source.Camera,
+                simulcast: false,
+              }).catch(function () {});
+              pendingTracks = pendingTracks.filter(function (t) { return t !== vidTrack; });
+            });
           } catch (err) {
             log('error', 'LiveKit connect failed: ' + (err && err.message ? err.message : err));
             post('ERROR', { message: 'Failed to connect to call server' });

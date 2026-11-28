@@ -13,6 +13,7 @@ import toast from "react-hot-toast";
 import { useChatStore } from "../store/useChatStore";
 import { useAuthStore } from "../store/useAuthStore";
 import { useStickerStore } from "../store/useStickerStore";
+import { usePrivacyStore } from "../store/usePrivacyStore";
 import ChatHeader from "./ChatHeader";
 import MessageInput from "./MessageInput";
 import MessageSkeleton from "./Skeletons/MessageSkeleton";
@@ -52,18 +53,17 @@ function StickerTransferRing({ mode }) {
   );
 }
 
-function ChatContainer({ setAlertOpen }) {
+function ChatContainer() {
   const {
     messages,
     getMessages,
     isMessagesLoading,
     selectedUser,
-    subscribeToMessages,
-    unSubscribeFromMessages,
     typingUsers,
   } = useChatStore();
   const { authUser } = useAuthStore();
   const { packs, saveStickerToCollection } = useStickerStore();
+  const { protectScreenshots } = usePrivacyStore();
 
   const [previewSticker, setPreviewSticker] = useState(null);
   const [savingSticker, setSavingSticker] = useState(false);
@@ -85,13 +85,19 @@ function ChatContainer({ setAlertOpen }) {
   const isTyping = Boolean(selectedUser?._id && typingUsers?.[selectedUser._id]);
 
   useEffect(() => {
+    if (!protectScreenshots) {
+      document.body.classList.remove("privacy-block-print");
+      return;
+    }
+    document.body.classList.add("privacy-block-print");
+    return () => document.body.classList.remove("privacy-block-print");
+  }, [protectScreenshots]);
+
+  useEffect(() => {
     initialLoadDone.current = false;
     mountTimeRef.current = Date.now();
     getMessages(selectedUser._id);
-    subscribeToMessages();
-
-    return () => unSubscribeFromMessages();
-  }, [selectedUser._id, getMessages, subscribeToMessages, unSubscribeFromMessages]);
+  }, [selectedUser._id, getMessages]);
 
   useEffect(() => {
     if (messageEndRef.current) {
@@ -124,7 +130,7 @@ function ChatContainer({ setAlertOpen }) {
   if (isMessagesLoading) {
     return (
       <div className="flex-1 flex flex-col overflow-auto">
-        <ChatHeader setAlertOpen={setAlertOpen} />
+        <ChatHeader />
         <MessageSkeleton />
         <MessageInput />
       </div>
@@ -138,9 +144,16 @@ function ChatContainer({ setAlertOpen }) {
 
   return (
     <div className="flex-1 flex flex-col overflow-auto relative max-sm:pt-12 max-sm:-mt-2">
-      <ChatHeader setAlertOpen={setAlertOpen} />
+      <ChatHeader />
 
-      <div className="flex-1 overflow-y-auto px-3.5 sm:px-5 py-4 space-y-2.5 chat-scroll-container relative max-sm:pb-28">
+      <div
+        onContextMenu={(e) => {
+          if (protectScreenshots) e.preventDefault();
+        }}
+        className={`flex-1 overflow-y-auto px-3.5 sm:px-5 py-4 space-y-2.5 chat-scroll-container relative max-sm:pb-28 ${
+          protectScreenshots ? "privacy-protected-media" : ""
+        }`}
+      >
         {messages.length === 0 && !isTyping ? (
           <div className="h-full min-h-[260px] flex flex-col items-center justify-center text-center px-6 select-none">
             <div className="size-20 rounded-full overflow-hidden ring-2 ring-base-300 shadow-md bg-base-200 mb-3.5">
@@ -207,6 +220,7 @@ function ChatContainer({ setAlertOpen }) {
                         <img
                           src={message.stickerUri}
                           alt="Sticker"
+                          draggable={!protectScreenshots}
                           className={`w-36 h-36 sm:w-40 sm:h-40 object-contain select-none bg-transparent transition-opacity ${
                             isUploading || isDownloading ? "opacity-75" : ""
                           }`}
@@ -279,6 +293,7 @@ function ChatContainer({ setAlertOpen }) {
                       <img
                         src={message.image}
                         alt="Attachment"
+                        draggable={!protectScreenshots}
                         className="sm:max-w-[220px] rounded-xl mb-1.5"
                       />
                     )}
@@ -337,7 +352,12 @@ function ChatContainer({ setAlertOpen }) {
       {/* Sticker Preview & Save-to-Chatter Lightbox Modal */}
       {previewSticker && (
         <div
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 animate-in fade-in duration-150"
+          onContextMenu={(e) => {
+            if (protectScreenshots) e.preventDefault();
+          }}
+          className={`fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 animate-in fade-in duration-150 ${
+            protectScreenshots ? "privacy-protected-media" : ""
+          }`}
           onClick={() => setPreviewSticker(null)}
         >
           <button
@@ -353,6 +373,7 @@ function ChatContainer({ setAlertOpen }) {
             <img
               src={previewSticker.stickerUri}
               alt="Sticker preview"
+              draggable={!protectScreenshots}
               className="w-52 h-52 sm:w-60 sm:h-60 object-contain select-none"
               onClick={(e) => e.stopPropagation()}
             />

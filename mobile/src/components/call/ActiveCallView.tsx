@@ -57,12 +57,14 @@ const PIP_EDGE = 14;
 export const ActiveCallView = () => {
   const {
     callActive,
+    receivingCall,
     callType,
     callStatus,
     callDuration,
     roomName,
     preparedToken,
     preparedUrl,
+    facingMode,
     targetUser,
     callerName,
     callerAvatar,
@@ -177,9 +179,12 @@ export const ActiveCallView = () => {
     []
   );
 
+  const shouldKeepBridgeAlive =
+    Platform.OS !== 'web' && (callActive || receivingCall);
+
   // Register imperative command dispatcher for mute, camera, flip, swap & PiP
   useEffect(() => {
-    if (!callActive || Platform.OS === 'web') {
+    if (!shouldKeepBridgeAlive) {
       sdkInjectedRef.current = false;
       connectedSessionRef.current = null;
       setSdkReady(false);
@@ -236,7 +241,24 @@ export const ActiveCallView = () => {
       dispatch({ type: 'DISCONNECT' });
       registerBridgeCommandHandler(null);
     };
-  }, [callActive, registerBridgeCommandHandler]);
+  }, [shouldKeepBridgeAlive, registerBridgeCommandHandler]);
+
+  // Pre-warm LiveKit DNS, TLS & signaling socket while phone rings so Accept connects instantly
+  useEffect(() => {
+    if (
+      Platform.OS === 'web' ||
+      callActive ||
+      !receivingCall ||
+      !sdkReady ||
+      !preparedUrl ||
+      !preparedToken
+    ) {
+      return;
+    }
+    webViewRef.current?.injectJavaScript(
+      `window.__CALL_BRIDGE__ && window.__CALL_BRIDGE__.prepare(${JSON.stringify(preparedUrl)}, ${JSON.stringify(preparedToken)}, ${JSON.stringify(facingMode)});true;`
+    );
+  }, [callActive, receivingCall, sdkReady, preparedUrl, preparedToken, facingMode]);
 
   useEffect(() => {
     if (
@@ -354,7 +376,7 @@ export const ActiveCallView = () => {
     }
   };
 
-  if (!callActive) return null;
+  if (!shouldKeepBridgeAlive) return null;
 
   const participantName = targetUser?.fullName || callerName || 'User';
   const participantAvatar = targetUser?.profilePic || callerAvatar || '';
@@ -374,7 +396,9 @@ export const ActiveCallView = () => {
     ? 'Calling...'
     : 'Connecting...';
 
-  const containerStyle = isMinimized
+  const containerStyle = !callActive
+    ? styles.prewarmContainer
+    : isMinimized
     ? [
         styles.minimizedContainer,
         {
@@ -387,11 +411,11 @@ export const ActiveCallView = () => {
     : styles.fullscreenContainer;
 
   return (
-    <Animated.View style={containerStyle} pointerEvents="box-none">
-      {!isMinimized && !systemPip && <StatusBar style="light" />}
+    <Animated.View style={containerStyle} pointerEvents={callActive ? 'box-none' : 'none'}>
+      {callActive && !isMinimized && !systemPip && <StatusBar style="light" />}
 
       {/* Layer 0: Full-Screen Profile Image Backdrop (shown on audio calls & before video starts) */}
-      {!isMinimized && !systemPip && (
+      {callActive && !isMinimized && !systemPip && (
         <CallFullScreenBackdrop
           avatarUri={participantAvatar}
           name={participantName}
@@ -402,15 +426,15 @@ export const ActiveCallView = () => {
         />
       )}
 
-      {/* Layer 1: Hardware-accelerated WebView WebRTC Engine (transparent where video is off) */}
+      {/* Layer 1: Single persistent WebView pre-warmed during incoming ring & reused live */}
       {Platform.OS !== 'web' && (
         <View
           style={[
             styles.webviewWrapper,
-            audioOnlyMode && !isMinimized && styles.hiddenAudioWebView,
-            isMinimized && { borderRadius: isVoice ? 34 : 18, overflow: 'hidden', backgroundColor: '#0b141a' },
+            (!callActive || (audioOnlyMode && !isMinimized)) && styles.hiddenAudioWebView,
+            callActive && isMinimized && { borderRadius: isVoice ? 34 : 18, overflow: 'hidden', backgroundColor: '#0b141a' },
           ]}
-          pointerEvents={isMinimized || audioOnlyMode ? 'none' : 'auto'}
+          pointerEvents={!callActive || isMinimized || audioOnlyMode ? 'none' : 'auto'}
         >
           <WebView<{}>
             ref={webViewRef}
@@ -440,7 +464,7 @@ export const ActiveCallView = () => {
       )}
 
       {/* MINIMIZED IN-APP FLOATING PIP OVERLAY */}
-      {isMinimized ? (
+      {!callActive ? null : isMinimized ? (
         <View style={styles.pipTouchLayer} {...panResponder.panHandlers}>
           {isVoice ? (
             <View style={styles.voicePipCard}>
@@ -704,7 +728,17 @@ const styles = StyleSheet.create({
     zIndex: 4,
   },
   hiddenAudioWebView: {
-    opacity: 0,
+    opacity: 0.01,
+  },
+  prewarmContainer: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    width: 2,
+    height: 2,
+    opacity: 0.01,
+    zIndex: -1,
+    overflow: 'hidden',
   },
   webview: {
     flex: 1,

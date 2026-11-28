@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { AlertCircle, CheckCircle2, Sparkles, X } from 'lucide-react-native';
+import { AlertCircle, CheckCircle2, Sticker, X } from 'lucide-react-native';
 import { useStickerStore } from '../../store/useStickerStore';
 import { useThemeStore } from '../../store/useThemeStore';
 
@@ -152,7 +152,7 @@ export const StickerImportModal: React.FC = () => {
                     { backgroundColor: theme.primary + '1c', transform: [{ scale: pulse }] },
                   ]}
                 >
-                  <Sparkles size={28} color={theme.primary} />
+                  <Sticker size={28} color={theme.primary} />
                 </Animated.View>
               </View>
 
